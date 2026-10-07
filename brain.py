@@ -164,9 +164,11 @@ class Brain:
 
     # ---- 睡眠(固定化) ----
 
-    def sleep(self):
+    def sleep(self, hours=SLEEP_HOURS):
         report = []
         touched = set()
+        # 睡眠が短いと、再生できる回数も減る
+        replays = max(1, round(REPLAYS_PER_NIGHT * hours / SLEEP_HOURS))
         for ep in self.hippocampus:
             strength = self.hippo_strength(ep)
             if strength < HIPPO_FORGET_BELOW:
@@ -175,7 +177,7 @@ class Brain:
             for a, b in combinations(ep["concepts"], 2):
                 key = link_key(a, b)
                 link = self.cortex.setdefault(key, {"w": 0.0, "recent": [], "n": 0, "first": None})
-                for _ in range(REPLAYS_PER_NIGHT):
+                for _ in range(replays):
                     link["w"] += CONSOLIDATE_LR * strength * (1 - link["w"])
                 self.use(link)
                 touched.add(key)
@@ -205,7 +207,7 @@ class Brain:
             else:
                 kept.append(ep)
         self.hippocampus = kept
-        self.now += SLEEP_HOURS
+        self.now += hours
         self.context = {}  # 起きたら作業中の文脈はリセット
         return report
 

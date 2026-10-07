@@ -125,6 +125,7 @@ def places_of(cwd, file_paths):
 def read_turns(limit=None):
     """セッションを新しい順に読み、ユーザー指示ごとの出来事にまとめる"""
     turns = []
+    seen = set()  # セッションを再開・分岐すると履歴がコピーされるので、同じ発言は1回だけ数える
     files = sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")), key=os.path.getmtime, reverse=True)
     for i, path in enumerate(files):
         if limit and len(turns) >= limit * 2:
@@ -144,6 +145,11 @@ def read_turns(limit=None):
                     text = text_of(msg.get("content"))
                     if not text.strip() or text.lstrip().startswith("<"):
                         continue  # ツールの結果やコマンド出力は指示ではない
+                    key = d.get("uuid") or (d.get("timestamp"), text)
+                    if key in seen:
+                        cur = None  # 続く Claude の作業も、すでに数えた分
+                        continue
+                    seen.add(key)
                     cur = {"t": d.get("timestamp"), "cwd": d.get("cwd"), "user": text, "session": path,
                            "reply": [], "edited": [], "read": []}
                     turns.append(cur)
@@ -251,7 +257,8 @@ def main():
             brain.now = max(brain.now, min(hours(at) - SLEEP_HOURS,
                                            hours(datetime.combine(day, datetime.min.time(), JST))
                                            + DAY_STARTS_AT))
-            brain.sleep()
+            # 次の作業までの間しか眠れない(徹夜に近い夜は短い睡眠になる)
+            brain.sleep(max(0.5, min(SLEEP_HOURS, hours(at) - brain.now)))
             nights += 1
         brain.now = max(brain.now, hours(at))
         concepts = (t["places"] + pick(t["user_terms"], USER_TERMS)
