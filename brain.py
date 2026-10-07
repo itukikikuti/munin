@@ -16,7 +16,7 @@ import re
 import sys
 from itertools import combinations
 
-from embed import Embedder, cosine
+from embed import Embedder
 
 # ---- パラメータ ----
 DECAY_D = 0.5                # 忘却の速さ(ACT-R の d)
@@ -202,10 +202,8 @@ class Brain:
                 rest = rest.replace(name.lower(), " ")
 
         if self.embedder and known:
-            vecs = self.embedder.concepts(sorted(known))
-            q = self.embedder.query(text) if vecs else None
-            if q:
-                sims = {n: cosine(q, v) for n, v in vecs.items()}
+            sims = self.embedder.similarities(text, sorted(known))
+            if sims:
                 mean = sum(sims.values()) / len(sims)
                 std = math.sqrt(sum((s - mean) ** 2 for s in sims.values()) / len(sims)) or 1.0
                 top = sorted(sims.items(), key=lambda x: -x[1])[:SEM_TOPK]
