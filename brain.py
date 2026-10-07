@@ -42,7 +42,7 @@ WM_CAPACITY = 5              # ワーキングメモリに保てる概念の数(
 FOCUS_DECAY = 0.3            # 注意の焦点から1つ前の話題に戻るごとに、強さが何倍になるか
 STRONG_CUE = 0.5             # これ以上の手がかりだけを、強化と文脈の対象にする
 RECALL_LR = 0.05             # 想起による強化
-MAX_USES = 50
+EXACT_USES = 3               # 取り出しやすさの計算で、時刻を正確に覚えておく直近の使用回数
 RECALL_THRESHOLD = 0.05
 AMBIGUITY_RATIO = 0.8        # 2位がこの比率以上なら「曖昧」
 LOW_CONFIDENCE = 0.15        # これ未満なら「うろ覚え」
@@ -74,7 +74,8 @@ class Brain:
         self.embedder = embedder
         self.last_cues = {}
         self.now = 0.0
-        self.cortex = {}       # link_key -> {"w": 保存強度, "uses": [使用時刻]}
+        # link_key -> {"w": 保存強度, "recent": [直近の使用時刻], "n": 使用回数, "first": 最初の使用時刻}
+        self.cortex = {}
         self.hippocampus = []  # {"concepts": [...], "t": 記録時刻, "nights": 再生された晩数}
         self.context = {}      # 概念 -> [最後に意識した時刻, 注意を向けた順番]
         self.seq = 0           # 注意を向けた回数(時刻が同じでも、どれが新しい話題か分かるように)
@@ -83,6 +84,11 @@ class Brain:
                 s = json.load(f)
             self.now = s["now"]
             self.cortex = s["cortex"]
+            for link in self.cortex.values():  # 古い形式(使用時刻の一覧)から変換
+                if "uses" in link:
+                    uses = link.pop("uses")
+                    link.update(recent=uses[-EXACT_USES:], n=len(uses),
+                                first=uses[0] if uses else None)
             self.hippocampus = s["hippocampus"]
             self.seq = s.get("seq", 0)
             self.context = {c: v if isinstance(v, list) else [v, 0]
@@ -92,15 +98,37 @@ class Brain:
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"now": self.now, "seq": self.seq, "cortex": self.cortex,
                        "hippocampus": self.hippocampus, "context": self.context},
-                      f, ensure_ascii=False, indent=1)
+                      f, ensure_ascii=False, separators=(",", ":"))
 
     # ---- 強度の計算 ----
 
+    def use(self, link):
+        """リンクを使ったことを記録する(直近の数回は時刻を、それより前は回数だけ残す)"""
+        link["recent"] = (link["recent"] + [self.now])[-EXACT_USES:]
+        link["n"] += 1
+        if link["first"] is None:
+            link["first"] = self.now
+
     def access(self, link):
-        """取り出しやすさ(0〜1)。使うほど高く、時間とともに下がる"""
-        total = sum((self.now - t + 1) ** -DECAY_D for t in link["uses"])
-        if total <= 0:
+        """取り出しやすさ(0〜1)。使うほど高く、時間とともに下がる
+
+        ACT-R の基本活性化 B = ln(Σ 経過時間^-d) を、Petrov(2006)のハイブリッド近似で求める。
+        直近の数回は正確に足し、それより前の使用は、最初の使用から直近までの間に
+        均等に散らばっていたとみなして積分で足す。使用履歴を捨てずに一定の計算量で済む。
+        """
+        if not link["n"]:
             return 0.0
+        d = DECAY_D
+        ages = [self.now - t + 1 for t in link["recent"]]
+        total = sum(a ** -d for a in ages)
+        rest = link["n"] - len(ages)
+        if rest > 0:
+            t_k = max(ages)                         # 正確に数えた中で一番古い使用
+            t_n = self.now - link["first"] + 1      # 最初の使用
+            if t_n > t_k:
+                total += rest * (t_n ** (1 - d) - t_k ** (1 - d)) / ((1 - d) * (t_n - t_k))
+            else:
+                total += rest * t_n ** -d
         b = math.log(total)
         return 1 / (1 + math.exp(-(b - ACCESS_TAU) / ACCESS_S))
 
@@ -146,10 +174,10 @@ class Brain:
             # 海馬の記録を何度も再生し、皮質のリンクを強める
             for a, b in combinations(ep["concepts"], 2):
                 key = link_key(a, b)
-                link = self.cortex.setdefault(key, {"w": 0.0, "uses": []})
+                link = self.cortex.setdefault(key, {"w": 0.0, "recent": [], "n": 0, "first": None})
                 for _ in range(REPLAYS_PER_NIGHT):
                     link["w"] += CONSOLIDATE_LR * strength * (1 - link["w"])
-                link["uses"] = (link["uses"] + [self.now])[-MAX_USES:]
+                self.use(link)
                 touched.add(key)
             ep["nights"] += 1
             report.append(f"再生: {' / '.join(ep['concepts'])} ({ep['nights']}晩目)")
@@ -323,7 +351,7 @@ class Brain:
             link = self.cortex.get(link_key(a, b))
             if link:
                 link["w"] += RECALL_LR * (1 - link["w"])
-                link["uses"] = (link["uses"] + [self.now])[-MAX_USES:]
+                self.use(link)
         for ep in hippo_hits:
             if used & set(ep["concepts"]):
                 ep["t"] = self.now  # 思い出した海馬の記録は鮮明さを取り戻す

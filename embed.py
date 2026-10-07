@@ -12,9 +12,9 @@ import numpy as np
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "qwen3-embedding:8b")
-# qwen3-embedding は前半の次元だけでも意味を保つように学習されている(MRL)。
-# 概念が数千になっても軽く扱えるよう、先頭の次元だけを使う
-EMBED_DIM = int(os.environ.get("EMBED_DIM", 1024))
+# モデルが出す次元をすべて使う(qwen3-embedding:8b は 4096 次元)
+# qwen3-embedding は前半の次元だけでも意味を保つので、軽くしたいときは EMBED_DIM で減らせる
+EMBED_DIM = int(os.environ.get("EMBED_DIM", 4096))
 # qwen3-embedding は、検索する側の文に指示文を付けると精度が上がる
 QUERY_INSTRUCT = ("Instruct: Given a user's request about their work, "
                   "retrieve the concept names it refers to\nQuery: ")

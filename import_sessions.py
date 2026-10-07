@@ -1,11 +1,12 @@
 """Claude Code のセッション記録から記憶を作る(LLM は使わない)
 
-  python import_sessions.py   ※ 今の記憶は消えて置き換わる
+  python import_sessions.py            ※ 全件。今の記憶は消えて置き換わる
+  python import_sessions.py 300        ※ 最近の300件だけ
 
 1回のユーザー指示と、それに続く Claude の作業を1つの出来事として海馬に入れる。
-  場所       : 作業フォルダ(cwd)と、そのプロジェクトのルート
-  話題の語   : ユーザーの発言と Claude の最後の返答から、形態素解析で取り出した名詞
-  ファイル   : 編集・作成したファイルの名前
+  場所       : 作業フォルダ(cwd)と、触ったファイルのあるプロジェクトのルート
+  話題の語   : ユーザーの発言と Claude の返答(全文)から、形態素解析で取り出した名詞
+  ファイル   : 編集・作成・読み込みしたファイルの名前(編集したものを優先)
 実際の日時どおりに時間を進め、日付が変わるたびに眠る。
 """
 import glob
@@ -28,12 +29,14 @@ PROJECTS = os.path.expanduser("~/.claude/projects")
 HOME = os.path.expanduser("~")
 JST = timezone(timedelta(hours=9))
 
-USER_TERMS = 5          # 1回の指示から取り出す語の数
-REPLY_TERMS = 3         # Claude の返答から取り出す語の数
-MAX_FILES = 3
-TEXT_LIMIT = 1500       # 貼り付けられたログなどで長すぎる文は先頭だけ見る
+# 1つの出来事として海馬が束ねる量には限りがあるので、出来事ごとに要素の数を絞る
+USER_TERMS = 6          # 1回の指示から取り出す語の数
+REPLY_TERMS = 6         # Claude の返答から取り出す語の数
+MAX_FILES = 5
+MAX_PLACES = 3
 MIN_DF = 2              # 2回以上の出来事に出てくる語だけ使う(一度きりの語は雑音が多い)
-MAX_DF_RATIO = 0.03     # 3%を超える出来事に出てくる語は、ありふれすぎていて手がかりにならない
+GENERIC_SESSION_RATIO = 0.3   # 3割を超えるセッションに出てくる語は、ありふれていて手がかりにならない
+GENERIC_MIN_SESSIONS = 3
 
 STOPWORDS = set("""
 感じ 場合 状態 方法 必要 確認 修正 対応 問題 部分 内容 今回 以下 以上 一つ 二つ 全部 全体 結果 理由
@@ -49,7 +52,8 @@ SKIP_POS1 = {"非自立", "代名詞", "特殊", "接尾", "副詞可能", "数"
 def nouns(text):
     """複合名詞を取り出す(連続する名詞をつなげる)"""
     out, buf = [], []
-    for tok in TOKENIZER.tokenize(text[:TEXT_LIMIT]):
+    text = re.sub(r"[*#|`>~_\[\]]+", " ", text)  # Markdown の記号(太字、見出し、表など)
+    for tok in TOKENIZER.tokenize(text):
         pos = tok.part_of_speech.split(",")
         if pos[0] == "名詞" and (buf or pos[1] not in SKIP_POS1):
             buf.append(tok.surface)
@@ -84,28 +88,46 @@ def text_of(content):
     return ""
 
 
-def place_of(cwd):
-    """作業フォルダ → 記憶する場所(ホームや一時フォルダは、どのプロジェクトでもないので除く)"""
-    if not cwd:
-        return []
-    low = cwd.lower()
-    if low.rstrip("\\/") == HOME.lower() or "\\temp\\" in low or "\\appdata\\" in low:
-        return []
-    places = [cwd]
-    m = re.match(r"(?i)^(c:\\dev\\[^\\]+)", cwd)
-    if m and m.group(1).lower() != low:
-        places.append(m.group(1))
-    m = re.match(r"(?i)^(.*\\documents\\obsidian)(\\|$)", cwd)
-    if m and m.group(1).lower() != low:
-        places.append(m.group(1))
+def ignored_place(path):
+    """どのプロジェクトでもない場所(ホーム、一時フォルダ、設定フォルダ)"""
+    low = path.lower().rstrip("\\/")
+    return (low == HOME.lower() or "\\temp" in low or "\\appdata\\" in low
+            or "\\.claude" in low or low.startswith("/tmp"))
+
+
+def project_root(path):
+    """パス → プロジェクトのルート(C:\\dev\\〜 や Obsidian の保管庫)"""
+    m = re.match(r"(?i)^(c:\\dev\\[^\\]+)", path)
+    if m:
+        return m.group(1)
+    m = re.match(r"(?i)^(.*\\documents\\obsidian)(\\|$)", path)
+    if m:
+        return m.group(1)
+    return None
+
+
+def places_of(cwd, file_paths):
+    """作業フォルダと触ったファイルから、記憶する場所を決める"""
+    places = []
+    if cwd and not ignored_place(cwd):
+        places.append(cwd)
+        root = project_root(cwd)
+        if root:
+            places.append(root)
+    for fp in file_paths:
+        root = project_root(fp)
+        if root and not ignored_place(fp):
+            places.append(root)
     return places
 
 
-def read_turns():
-    """全セッションを読み、ユーザー指示ごとの出来事にまとめる"""
+def read_turns(limit=None):
+    """セッションを新しい順に読み、ユーザー指示ごとの出来事にまとめる"""
     turns = []
-    files = glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
+    files = sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")), key=os.path.getmtime, reverse=True)
     for i, path in enumerate(files):
+        if limit and len(turns) >= limit * 2:
+            break  # 必要な件数が十分に集まった(並べ替えたあと新しい順に limit 件使う)
         print(f"\r  読み込み {i + 1}/{len(files)}", end="", file=sys.stderr, flush=True)
         cur = None
         with open(path, encoding="utf-8") as f:
@@ -121,46 +143,91 @@ def read_turns():
                     text = text_of(msg.get("content"))
                     if not text.strip() or text.lstrip().startswith("<"):
                         continue  # ツールの結果やコマンド出力は指示ではない
-                    cur = {"t": d.get("timestamp"), "cwd": d.get("cwd"), "user": text,
-                           "reply": "", "files": []}
+                    cur = {"t": d.get("timestamp"), "cwd": d.get("cwd"), "user": text, "session": path,
+                           "reply": [], "edited": [], "read": []}
                     turns.append(cur)
                 elif d.get("type") == "assistant" and cur is not None:
                     for b in msg.get("content") or []:
                         if b.get("type") == "text" and b.get("text", "").strip():
-                            cur["reply"] = b["text"]  # 最後の返答(まとめ)を残す
-                        elif b.get("type") == "tool_use" and b.get("name") in ("Edit", "Write", "NotebookEdit"):
-                            fp = (b.get("input") or {}).get("file_path") or (b.get("input") or {}).get("notebook_path")
-                            if fp:
-                                name = os.path.basename(fp)
-                                if name not in cur["files"]:
-                                    cur["files"].append(name)
+                            cur["reply"].append(b["text"])
+                        elif b.get("type") == "tool_use":
+                            inp = b.get("input") or {}
+                            fp = inp.get("file_path") or inp.get("notebook_path")
+                            if not fp:
+                                continue
+                            kind = "edited" if b.get("name") in ("Edit", "Write", "NotebookEdit") else \
+                                   "read" if b.get("name") == "Read" else None
+                            if kind and fp not in cur[kind]:
+                                cur[kind].append(fp)
     print(file=sys.stderr)
     return [t for t in turns if t["t"]]
 
 
+def unify_case(turns):
+    """大文字小文字だけが違うパス(C:\\dev\\ET と C:\\dev\\et)を、よく使われる表記にそろえる"""
+    seen = Counter()
+    for t in turns:
+        for p in [t["cwd"] or ""] + t["edited"] + t["read"]:
+            seen[p] += 1
+    best = {}
+    for p, c in seen.items():
+        k = p.lower()
+        if k not in best or c > seen[best[k]]:
+            best[k] = p
+    fix = lambda p: best.get(p.lower(), p) if p else p
+    for t in turns:
+        t["cwd"] = fix(t["cwd"])
+        t["edited"] = [fix(p) for p in t["edited"]]
+        t["read"] = [fix(p) for p in t["read"]]
+    # 場所(プロジェクトのルート)も同じようにそろえる
+    roots = Counter()
+    for t in turns:
+        t["places"] = places_of(t["cwd"], t["edited"] + t["read"])
+        roots.update(t["places"])
+    best = {}
+    for p, c in roots.items():
+        if p.lower() not in best or c > roots[best[p.lower()]]:
+            best[p.lower()] = p
+    for t in turns:
+        t["places"] = list(dict.fromkeys(best[p.lower()] for p in t["places"]))[:MAX_PLACES]
+        names = [os.path.basename(p) for p in t["edited"] + t["read"]]
+        t["files"] = list(dict.fromkeys(n for n in names if n))
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
+    limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
     t0 = time.time()
-    turns = read_turns()
+    turns = read_turns(limit)
     turns.sort(key=lambda t: t["t"])
-    print(f"出来事 {len(turns)}件")
+    if limit:
+        turns = turns[-limit:]
+    unify_case(turns)
+    print(f"出来事 {len(turns)}件 ({turns[0]['t'][:10]} 〜 {turns[-1]['t'][:10]})")
 
     # 形態素解析して、語ごとに「いくつの出来事に出てくるか」を数える
     for i, t in enumerate(turns):
-        if i % 100 == 0:
+        if i % 50 == 0:
             print(f"\r  形態素解析 {i}/{len(turns)}", end="", file=sys.stderr, flush=True)
         t["user_terms"] = nouns(t["user"])
-        t["reply_terms"] = nouns(t["reply"])
+        t["reply_terms"] = nouns("\n".join(t["reply"]))
     print(file=sys.stderr)
-    df = Counter()
+    df = Counter()          # 語ごとに、いくつの出来事に出てくるか
+    session_terms = {}      # セッションごとに出てくる語
     for t in turns:
-        df.update(set(t["user_terms"]) | set(t["reply_terms"]) | set(t["files"]))
-    max_df = max(MIN_DF + 1, len(turns) * MAX_DF_RATIO)
+        terms = set(t["user_terms"]) | set(t["reply_terms"]) | set(t["files"])
+        df.update(terms)
+        session_terms.setdefault(t["session"], set()).update(terms)
+    sdf = Counter(w for terms in session_terms.values() for w in terms)
+    # 多くのセッションにまたがって出てくる語は、話題を表さないありふれた語
+    max_sdf = max(GENERIC_MIN_SESSIONS, len(session_terms) * GENERIC_SESSION_RATIO)
+    usable_term = lambda w: df[w] >= MIN_DF and sdf[w] <= max_sdf
+    print(f"セッション {len(session_terms)}件 / 語の種類 {len(df)} → 使う語 "
+          f"{sum(1 for w in df if usable_term(w))}")
 
     def pick(terms, k):
         tf = Counter(terms)
-        scored = [(c * math.log(len(turns) / df[w]), w) for w, c in tf.items()
-                  if MIN_DF <= df[w] <= max_df]
+        scored = [(c * math.log(len(turns) / df[w]), w) for w, c in tf.items() if usable_term(w)]
         return [w for _, w in sorted(scored, reverse=True)[:k]]
 
     # 実際の日時どおりに出来事を体験させ、日付が変わるたびに眠る
@@ -180,9 +247,9 @@ def main():
             brain.sleep()
             nights += 1
         brain.now = max(brain.now, (at - origin).total_seconds() / 3600)
-        concepts = (place_of(t["cwd"]) + pick(t["user_terms"], USER_TERMS)
+        concepts = (t["places"] + pick(t["user_terms"], USER_TERMS)
                     + pick(t["reply_terms"], REPLY_TERMS)
-                    + [f for f in t["files"] if MIN_DF <= df[f] <= max_df][:MAX_FILES])
+                    + [f for f in t["files"] if usable_term(f)][:MAX_FILES])
         concepts = list(dict.fromkeys(concepts))
         if len(concepts) >= 2:
             brain.learn(concepts)
