@@ -32,8 +32,16 @@ DOWNSCALE = 0.97             # 睡眠中のシナプス整理(全体を少し弱
 PRUNE_BELOW = 0.02           # これ以下のリンクは消える
 SLEEP_HOURS = 8
 ASSOC_FREQ_WEIGHT = 1.0      # 連合強度で「よく一緒に出てくるか」を「特に結びついているか」に対してどれだけ重視するか
-CONTEXT_MIN = 0.3            # 指示が今の話題を指していないときに、ワーキングメモリに向ける注意
-PRIMING = 0.5                # 今の話題に近い記憶の活性を、最大で何割増しにするか
+CONTEXT_MIN = 0.3            # 指示が今の話題を指していないときの、ワーキングメモリの強さ(プライミング用)
+PRIMING = 0.2                # 指示が今の話題を指していないとき、今の話題に近い記憶の活性を最大で何割増しにするか
+GIST_SHARE = 0.5             # 手がかりに向ける注意のうち、出来事の要旨による照合に向ける割合
+GIST_TOPK = 10               # 呼び起こすエピソード記憶の痕跡の数
+GIST_TEMP = 0.03             # 意味の近さの差を、呼び起こしの強さの差にどれだけはっきり反映するか(小さいほど1位が独占)
+GIST_DECAY = 0.2             # 古い痕跡ほど呼び起こされにくくする度合い(経過時間^-d)
+GIST_Z_MIN = 1.5             # 一番近い痕跡が、他より何σ高ければ呼び起こし始めるか
+GIST_Z_FULL = 3.5
+GIST_ABS_MIN = 0.4           # 一番近い痕跡の類似度がこれ以下なら、呼び起こさない
+GIST_ABS_FULL = 0.6
 DEICTIC_CONTEXT = 0.6        # 指示語(「この」「それ」など)があるとき、ワーキングメモリに向ける注意
 OMITTED_CONTEXT = 0.8        # 対象が省かれている(「直して」だけ)とき、ワーキングメモリに向ける注意
 ZIPF_COMMON = 5.5            # この頻度(Zipf)以上の日常語は、手がかりとしてほぼ役に立たない
@@ -144,8 +152,13 @@ class Brain:
         # link_key -> {"w": 保存強度, "recent": [直近の使用時刻], "n": 使用回数, "first": 最初の使用時刻}
         self.cortex = {}
         self.hippocampus = []  # {"concepts": [...], "t": 記録時刻, "nights": 再生された晩数}
+        # エピソード記憶の痕跡: 出来事ごとの要旨(意味のベクトルの鍵)と、含まれていた概念。
+        # 海馬から皮質へ移ったあとも残る(多重痕跡理論)。古いものほど呼び起こされにくい
+        self.traces = []       # {"gist": 要旨の鍵, "concepts": [...], "t": 記録時刻}
         self.context = {}      # 概念 -> [最後に意識した時刻, 注意を向けた順番]
         self.seq = 0           # 注意を向けた回数(時刻が同じでも、どれが新しい話題か分かるように)
+        self._rev = 0          # 皮質が変わるたびに増える(つながりの計算を使い回すため)
+        self._assoc = None
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 s = json.load(f)
@@ -157,6 +170,7 @@ class Brain:
                     link.update(recent=uses[-EXACT_USES:], n=len(uses),
                                 first=uses[0] if uses else None)
             self.hippocampus = s["hippocampus"]
+            self.traces = s.get("traces", [])
             self.seq = s.get("seq", 0)
             self.context = {c: v if isinstance(v, list) else [v, 0]
                             for c, v in s["context"].items()}
@@ -164,8 +178,10 @@ class Brain:
     def save(self):
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"now": self.now, "seq": self.seq, "cortex": self.cortex,
-                       "hippocampus": self.hippocampus, "context": self.context},
+                       "hippocampus": self.hippocampus, "traces": self.traces, "context": self.context},
                       f, ensure_ascii=False, separators=(",", ":"))
+        if self.embedder:
+            self.embedder.save()
 
     # ---- 強度の計算 ----
 
@@ -175,6 +191,7 @@ class Brain:
         link["n"] += 1
         if link["first"] is None:
             link["first"] = self.now
+        self._rev += 1
 
     def access(self, link):
         """取り出しやすさ(0〜1)。使うほど高く、時間とともに下がる
@@ -206,13 +223,26 @@ class Brain:
         return 0.5 ** ((self.now - ep["t"]) / HIPPO_HALFLIFE)
 
     def neighbors(self):
+        return self.associations()[0]
+
+    def associations(self):
+        """皮質のつながり: (隣接, 概念ごとのつながりの強さの合計, 全体の合計)
+
+        時刻と皮質が変わらないうちは、計算し直さずに使い回す。
+        """
+        key = (self._rev, self.now, len(self.cortex))
+        if self._assoc and self._assoc[0] == key:
+            return self._assoc[1]
         adj = {}
-        for key, link in self.cortex.items():
-            a, b = key.split("\t")
+        for k, link in self.cortex.items():
+            a, b = k.split("\t")
             eff = self.effective(link)
             adj.setdefault(a, []).append((b, eff))
             adj.setdefault(b, []).append((a, eff))
-        return adj
+        degree = {n: sum(eff for _, eff in links) for n, links in adj.items()}
+        result = (adj, degree, sum(degree.values()) or 1.0)
+        self._assoc = (key, result)
+        return result
 
     def known_concepts(self):
         names = set(self.context)
@@ -224,9 +254,14 @@ class Brain:
 
     # ---- 覚える(海馬に記録) ----
 
-    def learn(self, concepts):
+    def learn(self, concepts, gist=None):
+        """出来事を覚える。gist はその出来事の要旨を表す文(指示文など。なければ概念を並べたもの)"""
         concepts = list(dict.fromkeys(concepts))
         self.hippocampus.append({"concepts": concepts, "t": self.now, "nights": 0})
+        if self.embedder:
+            key = self.embedder.remember_gist(gist or " ".join(concepts))
+            if key:
+                self.traces.append({"gist": key, "concepts": concepts, "t": self.now})
         self.attend(concepts)
 
     # ---- 睡眠(固定化) ----
@@ -274,6 +309,7 @@ class Brain:
             else:
                 kept.append(ep)
         self.hippocampus = kept
+        self._rev += 1
         self.now += hours
         self.context = {}  # 起きたら作業中の文脈はリセット
         return report
@@ -309,11 +345,12 @@ class Brain:
                 i = low.find(n, i + 1)
 
         if self.embedder and known:
-            sims = self.embedder.similarities(text, sorted(known))
-            if sims:
-                mean = sum(sims.values()) / len(sims)
-                std = math.sqrt(sum((s - mean) ** 2 for s in sims.values()) / len(sims)) or 1.0
-                top = sorted(sims.items(), key=lambda x: -x[1])[:SEM_TOPK]
+            names = sorted(known)
+            arr = self.embedder.similarities(text, names) if self.embedder.ensure(names) else None
+            if arr is not None:
+                mean = float(arr.mean())
+                std = float(arr.std()) or 1.0
+                top = [(names[i], float(arr[i])) for i in arr.argsort()[::-1][:SEM_TOPK]]
                 z_top = (top[0][1] - mean) / std
                 # 一番近い概念の強さは、どれだけ際立っているか(相対)と、
                 # 類似度そのものの高さ(絶対)の両方で決める
@@ -346,13 +383,22 @@ class Brain:
         total = sum(cue_strength.values())
         omitted = not content_words(text)
         referential = omitted or bool(DEICTIC.search(text))
+        # 文脈を指していない指示では、文脈は注意を奪わず、思い出しやすさを少し変える(プライミング)だけ
         budget = (OMITTED_CONTEXT if omitted else DEICTIC_CONTEXT) if referential else CONTEXT_MIN
-        scale = (1 - budget) / max(1.0, total) if total else 0.0
-        attention = {c: s * scale for c, s in cue_strength.items()}
-        wm = self.working_memory() if use_context else {}
-        context ={c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
+        cue_budget = 1 - budget if referential else 1.0
 
-        act_cue, hits = self.activate(attention)
+        # 手がかりに向ける注意を、語による手がかりと、出来事の要旨による照合で分け合う
+        episodic, gate = self.recall_traces(text)
+        gist_budget = cue_budget * GIST_SHARE * gate
+        word_budget = cue_budget - gist_budget
+        scale = word_budget / max(1.0, total) if total else 0.0
+        attention = {c: s * scale for c, s in cue_strength.items()}
+        reinstated = {c: gist_budget * a for c, a in episodic.items()}
+        self.last_episodic = reinstated
+        wm = self.working_memory() if use_context else {}
+        context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
+
+        act_cue, hits = self.activate(attention, reinstated)
         act_ctx, ctx_hits = self.activate(context)
         if referential:
             # 指示が今の話題を指している: 文脈から届いた記憶も、そのまま思い浮かぶ
@@ -375,8 +421,43 @@ class Brain:
             self.reinforce(strong_cues, answer, hits)
         return cues, fragments, answer
 
-    def activate(self, senders):
-        """活性の発生源から、海馬のパターン補完と皮質の拡散で、各概念の活性を求める"""
+    def recall_traces(self, text):
+        """エピソード記憶の痕跡を、指示との意味の近さで呼び起こす
+
+        要旨が指示と近い出来事ほど、また新しい出来事ほど強く呼び起こされ、その出来事に含まれていた
+        概念(場所を含む)が思い浮かぶ。どの痕跡も指示と際立って近くなければ、何も呼び起こさない。
+        戻り値: ({概念: 呼び起こされた強さ(合計1)}, 呼び起こしの確かさ 0〜1)
+        """
+        traces = [tr for tr in self.traces if tr["gist"] in self.embedder.index] if self.embedder else []
+        if not traces:
+            return {}, 0.0
+        sims = self.embedder.similarities(text, [tr["gist"] for tr in traces])
+        if sims is None:
+            return {}, 0.0
+        order = sims.argsort()[::-1]
+        best = float(sims[order[0]])
+        z = (best - float(sims.mean())) / (float(sims.std()) or 1.0)
+        gate = (min(1.0, max(0.0, (z - GIST_Z_MIN) / (GIST_Z_FULL - GIST_Z_MIN)))
+                * min(1.0, max(0.0, (best - GIST_ABS_MIN) / (GIST_ABS_FULL - GIST_ABS_MIN))))
+        if gate <= 0:
+            return {}, 0.0
+        weights = {}
+        for k in order[:GIST_TOPK]:
+            tr = traces[k]
+            recency = (self.now - tr["t"] + 1) ** -GIST_DECAY
+            weights[k] = math.exp((float(sims[k]) - best) / GIST_TEMP) * recency
+        norm = sum(weights.values())
+        out = {}
+        for k, w in weights.items():
+            for c in traces[k]["concepts"]:
+                out[c] = out.get(c, 0) + w / norm
+        return out, gate
+
+    def activate(self, senders, reinstated=None):
+        """活性の発生源から、海馬のパターン補完と皮質の拡散で、各概念の活性を求める
+
+        reinstated: エピソード記憶の痕跡から、すでに呼び起こされている概念
+        """
         # 海馬のパターン補完: 手がかりが一部でも合えば、記録全体が呼び起こされる
         # 多くの記録に共通する語(「アプリ」など)は、どれか1つを呼び起こす力が弱い
         count = {}
@@ -386,6 +467,8 @@ class Brain:
         # 同じ概念が複数の記録で呼び起こされたら、その分だけ強く思い浮かぶ(足し合わせる)。
         # 手がかりの力は記録の数で割ってあるので、足しても手がかり1つ分を超えない
         sources = dict(senders)
+        for c, a in (reinstated or {}).items():
+            sources[c] = sources.get(c, 0) + a
         hits = []
         reinstated = {}
         for ep in self.hippocampus:
@@ -408,9 +491,7 @@ class Brain:
         # P(i) が大きいので、どちらも強度が下がる。手がかりと特に結びついた概念にだけ活性が届く。
         # ただし比率だけだと、一度たまたま一緒に出てきた珍しい概念が過大評価されるので、
         # 実際によく一緒に出てくるか(P(i|j))でも重み付けする
-        adj = self.neighbors()
-        degree = {n: sum(eff for _, eff in links) for n, links in adj.items()}
-        total = sum(degree.values()) or 1.0
+        adj, degree, total = self.associations()
         scale = math.log(max(2, len(adj)))  # ln(lift) の最大値の目安で 0〜1 にそろえる
         act = dict(sources)
         for j, a in {**senders, **sources}.items():

@@ -16,7 +16,6 @@
 
 結果は eval/report.md と eval/results.jsonl に保存する。本番の記憶(brain_state.json)は変えない。
 """
-import hashlib
 import json
 import math
 import os
@@ -32,7 +31,6 @@ from import_sessions import Life, analyze, load_turns, project_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "eval")
-PROMPT_CHARS = 2000      # 埋め込み検索で使う指示の長さ(貼り付けたログなどで長すぎるものは先頭だけ)
 CONF_BINS = [(0.0, 0.5), (0.5, 0.8), (0.8, 0.95), (0.95, 1.01)]
 METHODS = ["記憶モデル(文脈あり)", "記憶モデル(文脈なし)", "直前と同じ", "最頻", "キーワード", "埋め込み検索"]
 
@@ -41,43 +39,11 @@ def project(p):
     return project_root(p) or p if p else None
 
 
-class PromptIndex:
-    """過去の指示の埋め込み(RAG 方式の比較用)。計算したものはファイルに保存して使い回す"""
-
-    def __init__(self, embedder):
-        self.e = embedder
-        self.path = os.path.join(OUT, "prompt_embeddings")
-        self.vecs = {}
-        if os.path.exists(self.path + ".npy"):
-            keys = json.load(open(self.path + ".json", encoding="utf-8"))
-            self.vecs = dict(zip(keys, np.load(self.path + ".npy")))
-
-    @staticmethod
-    def key(text):
-        return hashlib.sha1(text[:PROMPT_CHARS].encode()).hexdigest()
-
-    def ensure(self, texts):
-        missing = list(dict.fromkeys(t[:PROMPT_CHARS] for t in texts if self.key(t) not in self.vecs))
-        for i in range(0, len(missing), 16):
-            batch = missing[i:i + 16]
-            for t, v in zip(batch, self.e._request(batch)):
-                self.vecs[self.key(t)] = v
-            print(f"\r  指示の埋め込み {min(i + 16, len(missing))}/{len(missing)}", end="", file=sys.stderr, flush=True)
-        if missing:
-            print(file=sys.stderr)
-            keys = list(self.vecs)
-            np.save(self.path + ".npy", np.array([self.vecs[k] for k in keys]))
-            json.dump(keys, open(self.path + ".json", "w", encoding="utf-8"))
-
-    def get(self, text):
-        return self.vecs[self.key(text)]
-
-
 class Baselines:
     """比較用の単純な方式(どれも、その時点より前のやり取りだけを使う)"""
 
-    def __init__(self, prompts, vocab):
-        self.prompts = prompts
+    def __init__(self, embedder, vocab):
+        self.embedder = embedder
         self.vocab = vocab
         self.prev = None
         self.freq = Counter()
@@ -98,14 +64,14 @@ class Baselines:
             if scores[best] > 0:
                 out["キーワード"] = self.past[best][2]
             E = np.array([e for _, e, _ in self.past])
-            out["埋め込み検索"] = self.past[int(np.argmax(E @ self.prompts.get(t["user"])))][2]
+            out["埋め込み検索"] = self.past[int(np.argmax(E @ self.embedder.gist(t["user"])))][2]
         return out
 
     def learn(self, t, proj):
         if proj:
             self.prev = proj
             self.freq[proj] += 1
-            self.past.append((self.tfidf(t["user_terms"]), self.prompts.get(t["user"]), proj))
+            self.past.append((self.tfidf(t["user_terms"]), self.embedder.gist(t["user"]), proj))
 
 
 def main():
@@ -120,16 +86,16 @@ def main():
     print(f"学習 {len(train)}件 ({train[0]['t'][:10]}〜{train[-1]['t'][:10]}) / "
           f"評価 {len(test)}件 ({test[0]['t'][:10]}〜{test[-1]['t'][:10]})")
 
+    # 指示の要旨のベクトル(記憶モデルの痕跡と、比較用の埋め込み検索の両方で使う)は先にまとめて計算する
     embedder = Embedder(os.path.join(HERE, "embeddings.json"))
-    prompts = PromptIndex(embedder)
-    prompts.ensure([t["user"] for t in turns])
+    embedder.ensure_gists([t["user"] for t in turns], progress=True)
 
     state = os.path.join(OUT, "state.json")
     if os.path.exists(state):
         os.remove(state)
     brain = Brain(state, embedder=embedder)
     life = Life(brain, turns[0])
-    base = Baselines(prompts, life.vocab)
+    base = Baselines(embedder, life.vocab)
 
     # 学習: 過去のやり取りを体験する(比較用の方式にも同じものを見せる)
     for i, t in enumerate(train):

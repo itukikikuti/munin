@@ -293,7 +293,7 @@ class Life:
         """やり取りを体験したあと、海馬に記録する"""
         concepts = self.episode(t)
         if len(concepts) >= 2:
-            self.brain.learn(concepts)
+            self.brain.learn(concepts, gist=t["user"])  # 要旨は指示文(その出来事が何についてだったか)
             self.learned += 1
 
     def experience(self, t):
@@ -324,7 +324,9 @@ def main():
 
     if os.path.exists(STATE):
         os.remove(STATE)
-    brain = Brain(STATE, embedder=None)
+    brain = Brain(STATE)
+    if brain.embedder:  # 出来事の要旨のベクトルを、先にまとめて計算しておく
+        brain.embedder.ensure_gists([t["user"] for t in turns], progress=True)
     life = Life(brain, turns[0])
     for i, t in enumerate(turns):
         if i % 50 == 0:
@@ -339,9 +341,8 @@ def main():
     print(f"皮質のリンク {len(brain.cortex)}本 / 概念 {len(brain.known_concepts())}個 / "
           f"場所 {len(places)}か所 / 海馬に残っている記録 {len(brain.hippocampus)}件")
 
-    # 思い出すときに使う埋め込みを、先にまとめて計算しておく
-    brain_e = Brain(STATE)
-    if brain_e.embedder and brain_e.embedder.ensure(sorted(brain_e.known_concepts()), progress=True):
+    # 思い出すときに使う概念の埋め込みを、先にまとめて計算しておく
+    if brain.embedder and brain.embedder.ensure(sorted(brain.known_concepts()), progress=True):
         print("埋め込みを計算しました")
     else:
         print("埋め込みモデルに接続できませんでした(思い出すときに計算します)")
