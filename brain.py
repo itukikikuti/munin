@@ -33,6 +33,11 @@ PRUNE_BELOW = 0.02           # これ以下のリンクは消える
 SLEEP_HOURS = 8
 ASSOC_FREQ_WEIGHT = 1.0      # 連合強度で「よく一緒に出てくるか」を「特に結びついているか」に対してどれだけ重視するか
 CONTEXT_MIN = 0.3            # 手がかりがはっきりしていても、ワーキングメモリに向ける注意の最低量
+DEICTIC_CONTEXT = 0.6        # 指示語(「この」「それ」など)があるとき、ワーキングメモリに向ける注意
+OMITTED_CONTEXT = 0.8        # 対象が省かれている(「直して」だけ)とき、ワーキングメモリに向ける注意
+ZIPF_COMMON = 5.5            # この頻度(Zipf)以上の日常語は、手がかりとしてほぼ役に立たない
+ZIPF_RARE = 2.5              # この頻度以下の語は、手がかりとして十分に役立つ
+INFO_FLOOR = 0.1             # 日常語でも、手がかりとしての強さはこれ以上残す
 CONTEXT_HALFLIFE = 1         # ワーキングメモリの半減期(時間)
 WM_CAPACITY = 5              # ワーキングメモリに保てる概念の数(人間は 4±1 程度)
 FOCUS_DECAY = 0.3            # 注意の焦点から1つ前の話題に戻るごとに、強さが何倍になるか
@@ -40,7 +45,7 @@ STRONG_CUE = 0.5             # これ以上の手がかりだけを、強化と�
 RECALL_LR = 0.05             # 想起による強化
 EXACT_USES = 3               # 取り出しやすさの計算で、時刻を正確に覚えておく直近の使用回数
 RECALL_THRESHOLD = 0.02       # これ未満の活性は、何も思い浮かばないのと同じ
-RETRIEVAL_TAU = 0.05          # 検索閾値(ACT-R の τ)。活性がこれを超えると、思い出せる確率が5割を超える
+RETRIEVAL_TAU = 0.035          # 検索閾値(ACT-R の τ)。活性がこれを超えると、思い出せる確率が5割を超える
 RETRIEVAL_S = 0.015           # 検索確率の、閾値付近でのなだらかさ(ACT-R の s)
 AMBIGUITY_RATIO = 0.8         # 2位がこの比率以上なら「迷う」
 INNER_PLACE_RATIO = 0.6       # 中のフォルダの活性が親のこの比率以上なら、中のフォルダを答えにする
@@ -76,6 +81,42 @@ def word_boundaries(text):
         pos += len(tok)
         bounds.add(pos)
     return bounds
+
+
+def informativeness(word):
+    """手がかりとしての情報量(0〜1)
+
+    日常的によく使う語(「設定」「アプリ」)は、どの記憶を指しているかの手がかりにならない。
+    日本語での使用頻度(Zipf 尺度。1〜7、大きいほどよく使う)が低い語ほど強い手がかりになる。
+    """
+    if is_place(word):
+        return 1.0
+    try:
+        from wordfreq import zipf_frequency
+        z = zipf_frequency(word, "ja")
+    except Exception:
+        return 1.0
+    return min(1.0, max(INFO_FLOOR, (ZIPF_COMMON - z) / (ZIPF_COMMON - ZIPF_RARE)))
+
+
+DEICTIC = re.compile(r"この|その|あの|これ|それ|あれ|ここ|そこ|あそこ|こっち|そっち|さっき|例の|今の")
+
+
+def content_words(text):
+    """文の中の内容語(名詞。指示語などは除く)"""
+    global _tokenizer
+    try:
+        if _tokenizer is None:
+            from janome.tokenizer import Tokenizer
+            _tokenizer = Tokenizer()
+    except ImportError:
+        return [text]
+    words = []
+    for tok in _tokenizer.tokenize(text):
+        pos = tok.part_of_speech.split(",")
+        if pos[0] == "名詞" and pos[1] not in ("代名詞", "非自立", "接尾", "数") and not DEICTIC.fullmatch(tok.surface):
+            words.append(tok.surface)
+    return words
 
 
 def is_inside(inner, outer):
@@ -261,7 +302,7 @@ class Brain:
                 # 語の境目にそろっていて、まだ他の名前に使われていない部分だけ一致とみなす
                 # (「マネーフォワード」の中の「ワード」は一致にしない)
                 if i in bounds and end in bounds and not any(used[i:end]):
-                    found[name] = 1.0
+                    found[name] = informativeness(name)
                     used[i:end] = [True] * len(n)
                     break
                 i = low.find(n, i + 1)
@@ -284,7 +325,7 @@ class Brain:
                     if base <= 0 or z <= SEM_Z_MIN:
                         break
                     # 2位以下は、1位との差が開くほど急に弱くなる
-                    a = base * ((z - SEM_Z_MIN) / (z_top - SEM_Z_MIN)) ** 2
+                    a = base * ((z - SEM_Z_MIN) / (z_top - SEM_Z_MIN)) ** 2 * informativeness(name)
                     if a > found.get(name, 0):
                         found[name] = a
         return found
@@ -293,16 +334,21 @@ class Brain:
         cue_strength = self.perceive(text)
         self.last_cues = cue_strength
         cues = sorted(cue_strength, key=lambda c: -cue_strength[c])
-        # 注意の分配(ACT-R): 注意の総量は一定で、手がかりが多いほど1つあたりは弱くなる
+        # 注意の分配(ACT-R): 注意の総量 W=1 を、指示の手がかりとワーキングメモリ(今考えていること)で
+        # 分け合う。人は、指示語(「この」「それ」)があるときや、「直して」「続けて」のように
+        # 何をするかの対象が省かれているときに、今の話題を指していると解釈する
         total = sum(cue_strength.values())
-        attention = {c: s / max(1.0, total) for c, s in cue_strength.items()}
+        budget = CONTEXT_MIN
+        if DEICTIC.search(text):
+            budget = DEICTIC_CONTEXT
+        if not content_words(text):
+            budget = OMITTED_CONTEXT
+        scale = (1 - budget) / max(1.0, total) if total else 0.0
+        attention = {c: s * scale for c, s in cue_strength.items()}
         sources = dict(attention)
 
-        # ワーキングメモリ(今考えていること)も活性の発生源になる。指示が曖昧なほど
-        # (「アプリのここ」など)、手がかりに使われなかった注意が文脈に向く。
         # 文脈そのものを思い出したことにはせず、そこから結びついた記憶へ活性を送るだけ
         wm = self.working_memory()
-        budget = max(CONTEXT_MIN, 1 - min(1.0, total))
         context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
         senders = {**context, **attention}
 
