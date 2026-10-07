@@ -131,9 +131,8 @@ def places_of(cwd, edited, read):
     return places
 
 
-def read_turns(limit=None, skip=()):
+def read_turns(limit=None):
     """セッションを新しい順に読み、ユーザー指示ごとの出来事にまとめる"""
-    skip = {s.lower() for s in skip}
     turns = []
     seen = set()  # セッションを再開・分岐すると履歴がコピーされるので、同じ発言は1回だけ数える
     files = sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")), key=os.path.getmtime, reverse=True)
@@ -141,8 +140,6 @@ def read_turns(limit=None, skip=()):
         if limit and len(turns) >= limit * 2:
             break  # 必要な件数が十分に集まった(並べ替えたあと新しい順に limit 件使う)
         print(f"\r  読み込み {i + 1}/{len(files)}", end="", file=sys.stderr, flush=True)
-        if path.lower() in skip:
-            continue
         cur = None
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -308,9 +305,9 @@ def parse_time(t):
     return datetime.fromisoformat(t["t"].replace("Z", "+00:00")).astimezone(JST)
 
 
-def load_turns(limit=None, skip=()):
+def load_turns(limit=None):
     """セッションを読み、時刻順に並べる(limit があれば最近の limit 件)"""
-    turns = read_turns(limit, skip)
+    turns = read_turns(limit)
     turns.sort(key=lambda t: t["t"])
     if limit:
         turns = turns[-limit:]

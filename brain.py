@@ -331,7 +331,12 @@ class Brain:
                         found[name] = a
         return found
 
-    def recall(self, text):
+    def recall(self, text, use_context=True, reinforce=True):
+        """指示から場所を思い出す
+
+        use_context=False: ワーキングメモリ(今の話題)を使わない(記憶そのものの力を測るとき)
+        reinforce=False  : 思い出しても記憶を強めない・ワーキングメモリも変えない(試しに思い出すとき)
+        """
         cue_strength = self.perceive(text)
         self.last_cues = cue_strength
         cues = sorted(cue_strength, key=lambda c: -cue_strength[c])
@@ -344,8 +349,8 @@ class Brain:
         budget = (OMITTED_CONTEXT if omitted else DEICTIC_CONTEXT) if referential else CONTEXT_MIN
         scale = (1 - budget) / max(1.0, total) if total else 0.0
         attention = {c: s * scale for c, s in cue_strength.items()}
-        wm = self.working_memory()
-        context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
+        wm = self.working_memory() if use_context else {}
+        context ={c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
 
         act_cue, hits = self.activate(attention)
         act_ctx, ctx_hits = self.activate(context)
@@ -365,8 +370,9 @@ class Brain:
                            key=lambda x: -x[1])
         answer = self.reconstruct(act, adj, cues)
         self.last_activation = act
-        strong_cues = [c for c in cues if cue_strength[c] >= STRONG_CUE]
-        self.reinforce(strong_cues, answer, hits)
+        if reinforce:
+            strong_cues = [c for c in cues if cue_strength[c] >= STRONG_CUE]
+            self.reinforce(strong_cues, answer, hits)
         return cues, fragments, answer
 
     def activate(self, senders):
