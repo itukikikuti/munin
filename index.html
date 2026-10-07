@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>記憶モデル</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #e3e1d9;
+  --accent: #d9622b; --accent-soft: #fbe7dc; --hippo: #3d7fb8; --hippo-soft: #deebf6;
+  --cortex: #8a877c; --place: #2f7d5b; --place-soft: #e0f0e7; --warn: #a86b00; --warn-soft: #fbf0d9;
+  --node: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161614; --panel: #201f1c; --ink: #ecebe6; --muted: #9b998f; --line: #34332e;
+    --accent: #f0864f; --accent-soft: #4a2a1a; --hippo: #6faee0; --hippo-soft: #1d3346;
+    --cortex: #8f8c80; --place: #5fc193; --place-soft: #17382a; --warn: #e3ad4a; --warn-soft: #3d2f14;
+    --node: #2a2925;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font-family: "Yu Gothic UI", "Hiragino Sans", "Meiryo", system-ui, sans-serif; font-size: 14px; line-height: 1.6; }
+header { display: flex; align-items: baseline; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 18px; margin: 0; }
+header .clock { color: var(--muted); font-variant-numeric: tabular-nums; }
+main { display: grid; grid-template-columns: 380px 1fr; gap: 16px; padding: 16px 20px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+.col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+.row { display: flex; gap: 8px; }
+input[type=text], input[type=number] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+  color: var(--ink); font: inherit; cursor: pointer; white-space: nowrap; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.danger { color: #c0392b; }
+.hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+.answer { margin-top: 12px; padding: 12px; border-radius: 8px; background: var(--place-soft); }
+.answer.none { background: var(--bg); color: var(--muted); }
+.answer .what { font-size: 12px; color: var(--muted); }
+.answer .path { font-family: Consolas, monospace; font-size: 16px; font-weight: 700; color: var(--place); word-break: break-all; }
+.meter { height: 6px; background: var(--line); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--place); }
+.warn { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); font-size: 13px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+.chip { padding: 1px 8px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 12px; }
+.bars { margin-top: 10px; display: grid; grid-template-columns: auto 1fr 36px; gap: 3px 8px; align-items: center; font-size: 12px; }
+.bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.bars .bar { height: 6px; background: var(--accent); border-radius: 3px; }
+.bars .val { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.btns { display: flex; flex-wrap: wrap; gap: 6px; }
+#log { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 0; }
+#graphwrap { position: relative; }
+svg#graph { width: 100%; height: 520px; display: block; }
+@media (max-width: 900px) { svg#graph { height: 380px; } }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.legend span::before { content: ""; display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 5px; border-top: 3px solid var(--cortex); }
+.legend .lh::before { border-top: 2px dashed var(--hippo); }
+.legend .la::before { width: 10px; height: 10px; border: 0; border-radius: 50%; background: var(--accent); }
+.legend .lp::before { width: 10px; height: 10px; border: 0; border-radius: 2px; background: var(--place); }
+.empty { fill: var(--muted); font-size: 13px; }
+.edge { stroke: var(--cortex); stroke-linecap: round; transition: stroke .4s, opacity .4s; }
+.edge.hippo { stroke: var(--hippo); stroke-dasharray: 5 4; }
+.edge.lit { stroke: var(--accent); }
+.node circle, .node rect { fill: var(--node); stroke: var(--cortex); stroke-width: 1.5; }
+.node.place rect { stroke: var(--place); }
+.node .glow { fill: var(--accent); stroke: none; transition: opacity .6s; }
+.node.cue circle, .node.cue rect { stroke: var(--accent); stroke-width: 3; }
+.node.answer rect { stroke-width: 3; }
+.node text { fill: var(--ink); font-size: 12px; pointer-events: none; }
+.node.place text { font-family: Consolas, monospace; fill: var(--place); font-weight: 700; }
+.node .act { fill: var(--accent); font-size: 10px; font-weight: 700; }
+.ep { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.ep:first-of-type { border-top: 0; }
+.ep .c { flex: 1; min-width: 0; }
+.ep .s { width: 80px; }
+.ep .s .meter { margin-top: 2px; }
+.ep .s .meter i { background: var(--hippo); }
+.ep .n { color: var(--muted); font-size: 12px; white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { padding: 4px 6px; text-align: left; border-top: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 600; border-top: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; }
+.twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 1200px) { .twocol { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>記憶モデル</h1>
+  <span class="clock" id="clock"></span>
+</header>
+<main>
+  <div class="col">
+    <section>
+      <h2>思い出す</h2>
+      <form class="row" id="recallForm">
+        <input type="text" id="recallText" placeholder="例: アプリのここを直して" autocomplete="off">
+        <button class="primary">思い出す</button>
+      </form>
+      <div id="result"></div>
+    </section>
+
+    <section>
+      <h2>覚える(海馬に記録)</h2>
+      <form class="row" id="learnForm">
+        <input type="text" id="learnText" placeholder="家計簿アプリ アプリ 自作 C:\dev\kakeibo" autocomplete="off">
+        <button>記録</button>
+      </form>
+      <p class="hint">一緒に覚える概念をスペースで区切って入力します。フォルダのパスは「場所」として扱います。</p>
+    </section>
+
+    <section>
+      <h2>時間</h2>
+      <div class="btns">
+        <button data-sleep="1">1晩眠る</button>
+        <button data-sleep="3">3晩眠る</button>
+        <button data-sleep="30">30晩眠る</button>
+      </div>
+      <form class="row" id="waitForm" style="margin-top:8px">
+        <input type="number" id="waitHours" value="2" min="0" step="0.5">
+        <button>時間を進める</button>
+      </form>
+      <p class="hint">睡眠中に海馬の記録が再生され、皮質へ移ります。1晩 = 睡眠8時間 + 起きている16時間。</p>
+    </section>
+
+    <section>
+      <h2>ログ</h2>
+      <pre id="log"></pre>
+      <div style="margin-top:10px"><button class="danger" id="reset">記憶をすべて消去</button></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section id="graphwrap">
+      <h2>記憶のネットワーク</h2>
+      <svg id="graph"></svg>
+      <div class="legend">
+        <span>皮質のリンク(太さ = 実効強度)</span>
+        <span class="lh">海馬の結びつき</span>
+        <span class="la">活性化</span>
+        <span class="lp">場所</span>
+      </div>
+    </section>
+    <div class="twocol">
+      <section>
+        <h2>海馬</h2>
+        <div id="hippo"></div>
+      </section>
+      <section>
+        <details>
+          <summary>皮質のリンク一覧</summary>
+          <table id="cortex"></table>
+        </details>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const NS = "http://www.w3.org/2000/svg";
+const isPlace = n => /^([A-Za-z]:[\\/]|\/|~[\\/])/.test(n);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+
+let state = null, lastRecall = null;
+const pos = new Map();
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await res.json();
+  if (!res.ok) { alert(data.error); return null; }
+  if (data.log) log(data.log);
+  state = data.state;
+  return data;
+}
+
+function log(lines) {
+  const el = $("#log");
+  el.textContent = lines.join("\n") + "\n" + el.textContent;
+}
+
+function renderClock() {
+  const day = Math.floor(state.now / 24) + 1, hour = Math.floor(state.now % 24);
+  $("#clock").textContent = `${day}日目 ${hour}時`;
+}
+
+function renderResult() {
+  const r = lastRecall;
+  if (!r) { $("#result").innerHTML = ""; return; }
+  const a = r.answer;
+  let html = "";
+  if (a.place) {
+    html += `<div class="answer"><div class="what">${a.about.length ? esc(a.about[0]) + " の場所は" : "場所は"}</div>
+      <div class="path">${esc(a.place)}</div>
+      <div class="what" style="margin-top:6px">確信度 ${a.confidence.toFixed(2)}</div>
+      <div class="meter"><i style="width:${Math.round(a.confidence * 100)}%"></i></div></div>`;
+    if (a.ambiguous.length) html += `<div class="warn">${a.ambiguous.map(esc).join(", ")} とも迷っています</div>`;
+  } else {
+    html += `<div class="answer none">場所は思い出せませんでした</div>`;
+  }
+  html += `<div class="chips">${r.cues.length ? r.cues.map(c => `<span class="chip">${esc(c)}</span>`).join("") : '<span class="hint">知っている概念が指示に含まれていません</span>'}</div>`;
+  if (r.fragments.length) {
+    html += `<div class="bars">` + r.fragments.slice(0, 8).map(([n, v]) =>
+      `<span class="name" title="${esc(n)}">${esc(n)}</span><span><span class="bar" style="display:block;width:${Math.max(2, v * 100)}%"></span></span><span class="val">${v.toFixed(2)}</span>`).join("") + `</div>`;
+  }
+  $("#result").innerHTML = html;
+}
+
+function renderHippo() {
+  const eps = state.hippocampus;
+  $("#hippo").innerHTML = eps.length ? eps.map(ep => `<div class="ep">
+      <div class="c">${ep.concepts.map(esc).join(" / ")}</div>
+      <div class="s"><span class="hint">鮮明さ ${ep.strength.toFixed(2)}</span><div class="meter"><i style="width:${ep.strength * 100}%"></i></div></div>
+      <div class="n">${ep.nights}晩再生</div></div>`).join("")
+    : '<p class="hint">空(新しい記録はありません)</p>';
+}
+
+function renderCortex() {
+  const rows = [...state.cortex].sort((x, y) => y.eff - x.eff);
+  $("#cortex").innerHTML = `<tr><th>リンク</th><th class="num">保存</th><th class="num">取出し</th><th class="num">実効</th></tr>` +
+    (rows.length ? rows.map(l => `<tr><td>${esc(l.a)} - ${esc(l.b)}</td><td class="num">${l.w.toFixed(2)}</td><td class="num">${l.access.toFixed(2)}</td><td class="num">${l.eff.toFixed(2)}</td></tr>`).join("")
+      : `<tr><td colspan="4" class="hint">空</td></tr>`);
+}
+
+// ---- ネットワーク図(簡易な力学モデルで配置) ----
+function buildGraph() {
+  const nodes = new Set(), edges = [];
+  for (const l of state.cortex) { nodes.add(l.a); nodes.add(l.b); edges.push({a: l.a, b: l.b, w: l.eff, kind: "cortex"}); }
+  for (const ep of state.hippocampus) {
+    ep.concepts.forEach(c => nodes.add(c));
+    for (let i = 0; i < ep.concepts.length; i++)
+      for (let j = i + 1; j < ep.concepts.length; j++)
+        edges.push({a: ep.concepts[i], b: ep.concepts[j], w: ep.strength, kind: "hippo"});
+  }
+  return {nodes: [...nodes], edges};
+}
+
+function layout(nodes, edges) {
+  for (const n of nodes) {
+    if (pos.has(n)) continue;
+    const nb = edges.find(e => (e.a === n && pos.has(e.b)) || (e.b === n && pos.has(e.a)));
+    const base = nb ? pos.get(nb.a === n ? nb.b : nb.a) : {x: 0, y: 0};
+    pos.set(n, {x: base.x + (Math.random() - .5) * 120, y: base.y + (Math.random() - .5) * 120});
+  }
+  for (const k of [...pos.keys()]) if (!nodes.includes(k)) pos.delete(k);
+  for (let it = 0; it < 300; it++) {
+    const t = 1 - it / 300, f = new Map(nodes.map(n => [n, {x: 0, y: 0}]));
+    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+      const p = pos.get(nodes[i]), q = pos.get(nodes[j]);
+      let dx = p.x - q.x, dy = p.y - q.y, d2 = dx * dx + dy * dy + .01, d = Math.sqrt(d2);
+      const rep = 9000 / d2;
+      f.get(nodes[i]).x += dx / d * rep; f.get(nodes[i]).y += dy / d * rep;
+      f.get(nodes[j]).x -= dx / d * rep; f.get(nodes[j]).y -= dy / d * rep;
+    }
+    for (const e of edges) {
+      const p = pos.get(e.a), q = pos.get(e.b);
+      const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) + .01;
+      const s = (d - 130) * 0.04 * (0.3 + e.w);
+      f.get(e.a).x += dx / d * s; f.get(e.a).y += dy / d * s;
+      f.get(e.b).x -= dx / d * s; f.get(e.b).y -= dy / d * s;
+    }
+    for (const n of nodes) {
+      const p = pos.get(n), v = f.get(n);
+      v.x -= p.x * 0.01; v.y -= p.y * 0.01;
+      const m = Math.hypot(v.x, v.y), lim = 20 * t + 1;
+      if (m > lim) { v.x *= lim / m; v.y *= lim / m; }
+      p.x += v.x; p.y += v.y;
+    }
+  }
+}
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+function renderGraph() {
+  const svg = $("#graph");
+  svg.innerHTML = "";
+  const {nodes, edges} = buildGraph();
+  if (!nodes.length) {
+    svg.setAttribute("viewBox", "0 0 400 200");
+    el("text", {x: 200, y: 100, "text-anchor": "middle", class: "empty"}, svg).textContent = "まだ何も覚えていません。左の「覚える」から記録してください";
+    return;
+  }
+  layout(nodes, edges);
+  const act = lastRecall ? lastRecall.activation : {};
+  const cues = new Set(lastRecall ? lastRecall.cues : []);
+  const answer = lastRecall && lastRecall.answer.place;
+
+  const xs = nodes.map(n => pos.get(n).x), ys = nodes.map(n => pos.get(n).y);
+  const pad = 90, minX = Math.min(...xs) - pad, minY = Math.min(...ys) - 50;
+  svg.setAttribute("viewBox", `${minX} ${minY} ${Math.max(...xs) - minX + pad} ${Math.max(...ys) - minY + 50}`);
+
+  const gE = el("g", {}, svg), gN = el("g", {}, svg);
+  for (const e of edges) {
+    const p = pos.get(e.a), q = pos.get(e.b);
+    const lit = (act[e.a] || 0) > .05 && (act[e.b] || 0) > .05;
+    el("line", {x1: p.x, y1: p.y, x2: q.x, y2: q.y,
+      class: `edge ${e.kind === "hippo" ? "hippo" : ""} ${lit && e.kind === "cortex" ? "lit" : ""}`,
+      "stroke-width": e.kind === "hippo" ? 1.5 : 1 + e.w * 7,
+      opacity: e.kind === "hippo" ? .35 + e.w * .6 : .25 + e.w * .75}, gE);
+  }
+  for (const n of nodes) {
+    const p = pos.get(n), a = act[n] || 0, place = isPlace(n);
+    const g = el("g", {class: `node ${place ? "place" : ""} ${cues.has(n) ? "cue" : ""} ${n === answer ? "answer" : ""}`,
+      transform: `translate(${p.x},${p.y})`}, gN);
+    const title = el("title", {}, g); title.textContent = `${n}\n活性 ${a.toFixed(2)}`;
+    if (place) {
+      const w = Math.min(200, n.length * 7.5 + 20);
+      el("rect", {x: -w / 2, y: -14, width: w, height: 28, rx: 5}, g);
+      el("rect", {x: -w / 2, y: -14, width: w, height: 28, rx: 5, class: "glow", opacity: a * .45}, g);
+      el("text", {y: 4, "text-anchor": "middle"}, g).textContent = n.length > 26 ? n.slice(0, 25) + "…" : n;
+      if (a > .05) el("text", {y: -20, "text-anchor": "middle", class: "act"}, g).textContent = a.toFixed(2);
+    } else {
+      const r = 9;
+      el("circle", {r: r + a * 10, class: "glow", opacity: a * .35}, g);
+      el("circle", {r}, g);
+      el("circle", {r, class: "glow", opacity: a * .9}, g);
+      el("text", {y: r + 16, "text-anchor": "middle"}, g).textContent = n;
+      if (a > .05) el("text", {y: -r - 6, "text-anchor": "middle", class: "act"}, g).textContent = a.toFixed(2);
+    }
+  }
+}
+
+function renderAll() {
+  renderClock(); renderResult(); renderHippo(); renderCortex(); renderGraph();
+}
+
+$("#recallForm").onsubmit = async e => {
+  e.preventDefault();
+  const d = await api("/api/recall", {text: $("#recallText").value});
+  if (d) { lastRecall = d.recall; renderAll(); }
+};
+$("#learnForm").onsubmit = async e => {
+  e.preventDefault();
+  const concepts = $("#learnText").value.split(/[\s、,]+/).filter(Boolean);
+  const d = await api("/api/learn", {concepts});
+  if (d) { $("#learnText").value = ""; lastRecall = null; renderAll(); }
+};
+document.querySelectorAll("[data-sleep]").forEach(b => b.onclick = async () => {
+  const d = await api("/api/sleep", {nights: +b.dataset.sleep});
+  if (d) { lastRecall = null; renderAll(); }
+});
+$("#waitForm").onsubmit = async e => {
+  e.preventDefault();
+  const d = await api("/api/wait", {hours: +$("#waitHours").value});
+  if (d) { lastRecall = null; renderAll(); }
+};
+$("#reset").onclick = async () => {
+  if (!confirm("記憶をすべて消去しますか?")) return;
+  const d = await api("/api/reset", {});
+  if (d) { lastRecall = null; pos.clear(); renderAll(); }
+};
+
+api("/api/state").then(renderAll);
+</script>
+</body>
+</html>
