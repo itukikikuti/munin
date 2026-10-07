@@ -32,7 +32,8 @@ DOWNSCALE = 0.97             # 睡眠中のシナプス整理(全体を少し弱
 PRUNE_BELOW = 0.02           # これ以下のリンクは消える
 SLEEP_HOURS = 8
 ASSOC_FREQ_WEIGHT = 1.0      # 連合強度で「よく一緒に出てくるか」を「特に結びついているか」に対してどれだけ重視するか
-CONTEXT_MIN = 0.3            # 手がかりがはっきりしていても、ワーキングメモリに向ける注意の最低量
+CONTEXT_MIN = 0.3            # 指示が今の話題を指していないときに、ワーキングメモリに向ける注意
+PRIMING = 0.5                # 今の話題に近い記憶の活性を、最大で何割増しにするか
 DEICTIC_CONTEXT = 0.6        # 指示語(「この」「それ」など)があるとき、ワーキングメモリに向ける注意
 OMITTED_CONTEXT = 0.8        # 対象が省かれている(「直して」だけ)とき、ワーキングメモリに向ける注意
 ZIPF_COMMON = 5.5            # この頻度(Zipf)以上の日常語は、手がかりとしてほぼ役に立たない
@@ -45,7 +46,7 @@ STRONG_CUE = 0.5             # これ以上の手がかりだけを、強化と�
 RECALL_LR = 0.05             # 想起による強化
 EXACT_USES = 3               # 取り出しやすさの計算で、時刻を正確に覚えておく直近の使用回数
 RECALL_THRESHOLD = 0.02       # これ未満の活性は、何も思い浮かばないのと同じ
-RETRIEVAL_TAU = 0.035          # 検索閾値(ACT-R の τ)。活性がこれを超えると、思い出せる確率が5割を超える
+RETRIEVAL_TAU = 0.05          # 検索閾値(ACT-R の τ)。活性がこれを超えると、思い出せる確率が5割を超える
 RETRIEVAL_S = 0.015           # 検索確率の、閾値付近でのなだらかさ(ACT-R の s)
 AMBIGUITY_RATIO = 0.8         # 2位がこの比率以上なら「迷う」
 INNER_PLACE_RATIO = 0.6       # 中のフォルダの活性が親のこの比率以上なら、中のフォルダを答えにする
@@ -338,36 +339,61 @@ class Brain:
         # 分け合う。人は、指示語(「この」「それ」)があるときや、「直して」「続けて」のように
         # 何をするかの対象が省かれているときに、今の話題を指していると解釈する
         total = sum(cue_strength.values())
-        budget = CONTEXT_MIN
-        if DEICTIC.search(text):
-            budget = DEICTIC_CONTEXT
-        if not content_words(text):
-            budget = OMITTED_CONTEXT
+        omitted = not content_words(text)
+        referential = omitted or bool(DEICTIC.search(text))
+        budget = (OMITTED_CONTEXT if omitted else DEICTIC_CONTEXT) if referential else CONTEXT_MIN
         scale = (1 - budget) / max(1.0, total) if total else 0.0
         attention = {c: s * scale for c, s in cue_strength.items()}
-        sources = dict(attention)
-
-        # 文脈そのものを思い出したことにはせず、そこから結びついた記憶へ活性を送るだけ
         wm = self.working_memory()
         context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
-        senders = {**context, **attention}
 
+        act_cue, hits = self.activate(attention)
+        # 文脈そのものを思い出したことにはせず、そこから結びついた記憶へ活性を送るだけ
+        act_ctx, ctx_hits = self.activate(context)
+        if referential:
+            # 指示が今の話題を指している: 文脈から届いた記憶も、そのまま思い浮かぶ
+            act = {n: min(1.0, act_cue.get(n, 0) + act_ctx.get(n, 0)) for n in {*act_cue, *act_ctx}}
+            hits += ctx_hits
+        else:
+            # プライミング: 文脈は、手がかりから届いた記憶のうち今の話題に近いものを思い出しやすくするだけ
+            # (天気の話をしているのに、直前の話題のフォルダを答えたりしない)
+            peak = max(act_ctx.values(), default=0) or 1.0
+            act = {n: min(1.0, a * (1 + PRIMING * act_ctx.get(n, 0) / peak)) for n, a in act_cue.items()}
+
+        adj = self.neighbors()
+        fragments = sorted(((n, a) for n, a in act.items()
+                            if n not in cues and a >= RECALL_THRESHOLD),
+                           key=lambda x: -x[1])
+        answer = self.reconstruct(act, adj, cues)
+        self.last_activation = act
+        strong_cues = [c for c in cues if cue_strength[c] >= STRONG_CUE]
+        self.reinforce(strong_cues, answer, hits)
+        return cues, fragments, answer
+
+    def activate(self, senders):
+        """活性の発生源から、海馬のパターン補完と皮質の拡散で、各概念の活性を求める"""
         # 海馬のパターン補完: 手がかりが一部でも合えば、記録全体が呼び起こされる
         # 多くの記録に共通する語(「アプリ」など)は、どれか1つを呼び起こす力が弱い
         count = {}
         for ep in self.hippocampus:
             for c in ep["concepts"]:
                 count[c] = count.get(c, 0) + 1
-        hippo_hits = []
+        # 同じ概念が複数の記録で呼び起こされたら、その分だけ強く思い浮かぶ(足し合わせる)。
+        # 手がかりの力は記録の数で割ってあるので、足しても手がかり1つ分を超えない
+        sources = dict(senders)
+        hits = []
+        reinstated = {}
         for ep in self.hippocampus:
             match = min(1.0, sum(senders[c] / count[c] for c in ep["concepts"]
                                  if c in senders))
             if match <= 0:
                 continue
             a = match * self.hippo_strength(ep)
-            hippo_hits.append(ep)
+            hits.append(ep)
             for c in ep["concepts"]:
-                sources[c] = max(sources.get(c, 0), a * 0.9)
+                reinstated[c] = reinstated.get(c, 0) + a * 0.9
+        for c, a in reinstated.items():
+            sources[c] = max(sources.get(c, 0), min(1.0, a))
 
         # 皮質の活性化拡散(ACT-R): 手がかりから、つながった概念へ1段だけ活性が流れる。
         # 流れる量は連合強度 S_ji = ln(P(i|j) / P(i))(Anderson の合理的分析)で決まる:
@@ -382,25 +408,17 @@ class Brain:
         total = sum(degree.values()) or 1.0
         scale = math.log(max(2, len(adj)))  # ln(lift) の最大値の目安で 0〜1 にそろえる
         act = dict(sources)
-        for j, a in {**context, **sources}.items():
+        for j, a in {**senders, **sources}.items():
             if degree.get(j, 0) <= 0:
                 continue
             for i, eff in adj[j]:
-                if i in sources or eff <= 0:
+                if i in sources or i in senders or eff <= 0:
                     continue
                 p_ij = eff / degree[j]
                 s = p_ij ** ASSOC_FREQ_WEIGHT * math.log(p_ij / (degree[i] / total)) / scale
                 if s > 0:
                     act[i] = min(1.0, act.get(i, 0) + a * s)
-
-        fragments = sorted(((n, a) for n, a in act.items()
-                            if n not in cues and a >= RECALL_THRESHOLD),
-                           key=lambda x: -x[1])
-        answer = self.reconstruct(act, adj, cues)
-        self.last_activation = act
-        strong_cues = [c for c in cues if cue_strength[c] >= STRONG_CUE]
-        self.reinforce(strong_cues, answer, hippo_hits)
-        return cues, fragments, answer
+        return act, hits
 
     def reconstruct(self, act, adj, cues=()):
         """活性の高い断片から答えを組み立てる"""
