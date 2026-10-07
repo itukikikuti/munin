@@ -213,12 +213,12 @@ class Brain:
         fragments = sorted(((n, a) for n, a in act.items()
                             if n not in cues and a >= RECALL_THRESHOLD),
                            key=lambda x: -x[1])
-        answer = self.reconstruct(act, adj)
+        answer = self.reconstruct(act, adj, cues)
         self.last_activation = act
         self.reinforce(cues, answer, hippo_hits)
         return cues, fragments, answer
 
-    def reconstruct(self, act, adj):
+    def reconstruct(self, act, adj, cues=()):
         """活性の高い断片から答えを組み立てる"""
         active = {n: a for n, a in act.items() if a >= RECALL_THRESHOLD}
         places = sorted(((n, a) for n, a in active.items() if is_place(n)), key=lambda x: -x[1])
@@ -237,10 +237,11 @@ class Brain:
                 linked.setdefault(a, set()).add(b)
                 linked.setdefault(b, set()).add(a)
 
-        # 「何の場所か」: その場所とつながる概念のうち、他の場所とはつながらない固有のもの
+        # 「何の場所か」: 指示に含まれていた固有に近い名前を優先し、なければ
+        # その場所とつながる概念のうち、他の場所とはつながらない固有のもの
         def specificity(n):
             places_linked = sum(1 for m in linked.get(n, ()) if is_place(m))
-            return (places_linked, -active[n])
+            return (places_linked > 2, n not in cues, places_linked, -active[n])
         about = sorted((n for n in linked.get(best, ()) if n in active and not is_place(n)),
                        key=specificity)[:1]
         return {"place": best, "about": about, "confidence": conf, "ambiguous": ambiguous}
