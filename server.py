@@ -51,8 +51,10 @@ def _handle(path, body):
         if not text:
             return 400, {"error": "指示を入力してください"}
         cues, fragments, answer = brain.recall(text)
-        result = {"recall": {"text": text, "cues": cues, "fragments": fragments,
-                             "answer": answer, "activation": brain.last_activation}}
+        result = {"recall": {"text": text, "cues": cues, "cue_strength": brain.last_cues,
+                             "fragments": fragments, "answer": answer,
+                             "activation": brain.last_activation,
+                             "embedding": bool(brain.embedder and brain.embedder.available)}}
     elif path == "/api/sleep":
         log = []
         for i in range(max(1, min(60, int(body.get("nights", 1))))):

@@ -203,10 +203,13 @@ function renderResult() {
       <div class="what" style="margin-top:6px">確信度 ${a.confidence.toFixed(2)}</div>
       <div class="meter"><i style="width:${Math.round(a.confidence * 100)}%"></i></div></div>`;
     if (a.ambiguous.length) html += `<div class="warn">${a.ambiguous.map(esc).join(", ")} とも迷っています</div>`;
+    if (a.uncertain) html += `<div class="warn">うろ覚えです(確信度が低い)</div>`;
   } else {
     html += `<div class="answer none">場所は思い出せませんでした</div>`;
   }
-  html += `<div class="chips">${r.cues.length ? r.cues.map(c => `<span class="chip">${esc(c)}</span>`).join("") : '<span class="hint">知っている概念が指示に含まれていません</span>'}</div>`;
+  const cs = r.cue_strength || {};
+  html += `<div class="chips">${r.cues.length ? r.cues.map(c => `<span class="chip" title="${cs[c] >= 1 ? "名前が一致" : "意味が近い"}">${esc(c)} ${(cs[c] ?? 1).toFixed(2)}</span>`).join("") : '<span class="hint">指示に関係する概念が見つかりません</span>'}</div>`;
+  if (!r.embedding) html += `<p class="hint">埋め込みモデルに接続できないため、名前の一致だけで探しています</p>`;
   if (r.fragments.length) {
     html += `<div class="bars">` + r.fragments.slice(0, 8).map(([n, v]) =>
       `<span class="name" title="${esc(n)}">${esc(n)}</span><span><span class="bar" style="display:block;width:${Math.max(2, v * 100)}%"></span></span><span class="val">${v.toFixed(2)}</span>`).join("") + `</div>`;
