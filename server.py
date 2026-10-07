@@ -5,7 +5,8 @@
 import json
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from brain import Brain, is_place
 
@@ -13,6 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
 PORT = int(os.environ.get("PORT", 8770))
 AWAKE_HOURS = 16
+LOCK = threading.Lock()  # 状態ファイルの読み書きを1リクエストずつにする
 
 
 def snapshot(brain):
@@ -29,6 +31,11 @@ def snapshot(brain):
 
 
 def handle(path, body):
+    with LOCK:
+        return _handle(path, body)
+
+
+def _handle(path, body):
     brain = Brain(STATE)
     result = {}
     if path == "/api/state":
@@ -101,4 +108,4 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"http://127.0.0.1:{PORT}", flush=True)
-    HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
