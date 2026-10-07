@@ -257,6 +257,7 @@ class Life:
         self.day = self.day_of(start)
         self.nights = 0
         self.learned = 0
+        self.session = None
 
     def hours(self, dt):
         return (dt - self.origin).total_seconds() / 3600
@@ -279,6 +280,10 @@ class Life:
             b.sleep(max(0.5, min(SLEEP_HOURS, self.hours(at) - b.now)))
             self.nights += 1
         b.now = max(b.now, self.hours(at))
+        # 新しい会話(セッション)が始まったら、前の会話で考えていたことは持ち越さない
+        if t["session"] != self.session:
+            b.context = {}
+            self.session = t["session"]
 
     def episode(self, t):
         """やり取りを1つの出来事(一緒に覚える概念の組)にする"""
