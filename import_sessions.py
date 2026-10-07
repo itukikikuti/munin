@@ -152,8 +152,8 @@ def read_turns(limit=None):
                 msg = d.get("message") or {}
                 if d.get("type") == "user":
                     text = text_of(msg.get("content"))
-                    if not text.strip() or text.lstrip().startswith("<"):
-                        continue  # ツールの結果やコマンド出力は指示ではない
+                    if not text.strip() or text.lstrip().startswith(("<", "[Request interrupted")):
+                        continue  # ツールの結果・コマンド出力・中断の記録は指示ではない
                     key = d.get("uuid") or (d.get("timestamp"), text)
                     if key in seen:
                         cur = None  # 続く Claude の作業も、すでに数えた分

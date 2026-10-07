@@ -28,7 +28,7 @@ import numpy as np
 
 from brain import DEICTIC, Brain, content_words
 from embed import Embedder
-from import_sessions import Life, analyze, load_turns, nouns, project_root
+from import_sessions import Life, analyze, load_turns, project_root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "eval")
@@ -156,6 +156,8 @@ def main():
         preds = base.predict(t)
         results.append({
             "t": t["t"], "prompt": t["user"][:200], "truth": truth,
+            # 直前に作業していたのと別のプロジェクトに移った指示(ここで記憶の力が問われる)
+            "switched": bool(truth) and base.prev is not None and base.prev not in {project(x) for x in truth},
             "referential": bool(DEICTIC.search(t["user"])) or not content_words(t["user"][:500]),
             "記憶モデル(文脈あり)": {"place": ctx["place"], "conf": ctx["confidence"], "uncertain": ctx["uncertain"],
                                  "ambiguous": ctx["ambiguous"]},
@@ -205,14 +207,23 @@ def make_report(results, train, test, seconds):
         n = len(js) or 1
         lines.append(f"| {m} | {hit / n:.1%} | {ans / n:.1%} | {hit / max(ans, 1):.1%} | {exact / n:.1%} |")
 
+    acc = lambda rs, m: f"{sum(judge(r, m)[1] for r in rs) / max(len(rs), 1):.1%}({len(rs)}件)"
+    switched = [r for r in with_truth if r["switched"]]
+    same = [r for r in with_truth if not r["switched"]]
+    lines += ["", "## 話題が切り替わったときの正解率", "",
+              "続けて同じプロジェクトで作業することが多いので、「直前と同じ」を答えるだけでも正解率は高くなる。"
+              "記憶が本当に役立つのは、直前と別のプロジェクトに移った指示。", "",
+              "| 方式 | 別のプロジェクトに移った | 直前と同じプロジェクト |", "|---|---|---|"]
+    for m in METHODS:
+        lines.append(f"| {m} | {acc(switched, m)} | {acc(same, m)} |")
+
     lines += ["", "## 指示の種類別の正解率", "",
               "指示語(「この」「それ」)を含む・対象が省かれている指示と、それ以外で分けた。", "",
               "| 方式 | 文脈を指す指示 | それ以外 |", "|---|---|---|"]
     ref = [r for r in with_truth if r["referential"]]
     other = [r for r in with_truth if not r["referential"]]
     for m in METHODS:
-        acc = lambda rs: f"{sum(judge(r, m)[1] for r in rs) / max(len(rs), 1):.1%}({len(rs)}件)"
-        lines.append(f"| {m} | {acc(ref)} | {acc(other)} |")
+        lines.append(f"| {m} | {acc(ref, m)} | {acc(other, m)} |")
 
     lines += ["", "## 確信度と実際の正解率(記憶モデル・文脈あり)", "",
               "確信度が正しく働いていれば、確信度が高いほど正解率も高くなる。", "",
