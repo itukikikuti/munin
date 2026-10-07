@@ -119,24 +119,29 @@ class GraphMap:
         iters = 300 if fresh > n * 0.2 else 80
         w = self.edges[:, 2]
         length = np.where(self.edges[:, 3] == 1, 60.0, 110.0)
-        chunk = max(1, int(4e7 // (n * 2)))
+        chunk = max(1, int(2e7 // n))
+        X = X.astype(np.float32)
         for it in range(iters):
             t = 1 - it / iters
             F = np.zeros_like(X)
+            x, y = X[:, 0], X[:, 1]
             for s in range(0, n, chunk):  # 反発(全ての点の組)。大きいときはメモリに収まるよう分けて計算する
-                D = X[s:s + chunk, None, :] - X[None, :, :]
-                d2 = (D ** 2).sum(-1) + 0.01
-                F[s:s + chunk] += (D * (6000 / d2 ** 1.5)[:, :, None]).sum(1)
+                dx = x[s:s + chunk, None] - x[None, :]
+                dy = y[s:s + chunk, None] - y[None, :]
+                d2 = dx * dx + dy * dy + np.float32(0.01)
+                k = np.float32(6000) / (d2 * np.sqrt(d2))
+                F[s:s + chunk, 0] += (dx * k).sum(1)
+                F[s:s + chunk, 1] += (dy * k).sum(1)
             if len(a):  # ばね(つながっている点の組)
                 d = X[b] - X[a]
                 dist = np.sqrt((d ** 2).sum(1)) + 0.01
-                f = d * ((dist - length) * 0.03 * (0.3 + w) / dist)[:, None]
+                f = (d * ((dist - length) * 0.03 * (0.3 + w) / dist)[:, None]).astype(np.float32)
                 np.add.at(F, a, f)
                 np.add.at(F, b, -f)
-            F -= X * 0.004  # 中心へ
+            F -= X * np.float32(0.004)  # 中心へ
             m = np.sqrt((F ** 2).sum(1))
             lim = 25 * t + 1
-            F *= np.minimum(1, lim / np.maximum(m, 1e-9))[:, None]
+            F *= np.minimum(1, lim / np.maximum(m, 1e-9))[:, None].astype(np.float32)
             X += F
         self.pos = {nid: X[i].tolist() for i, nid in enumerate(self.ids)}
         with open(self.layout_path, "w", encoding="utf-8") as f:
@@ -156,14 +161,60 @@ class GraphMap:
         self.world += ((WORLD - 2 * pad) - (hi - lo) / span * (WORLD - 2 * pad)) / 2  # 中央に寄せる
 
     def _label_order(self):
-        """ラベルを付ける優先順位(場所 → つながりの多い概念)。ズームが上がるほど下位まで付ける"""
+        """ラベルを付ける優先順位(場所 → つながりの多い概念)"""
         score = self.degree.copy()
         kinds = np.array(self.kinds)
         score[kinds == "place"] += 1e6
         score[kinds == "episode"] = -1
-        order = np.argsort(-score)
-        self.label_rank = np.empty(len(order), int)
-        self.label_rank[order] = np.arange(len(order))
+        self.label_priority = np.argsort(-score)
+        self.label_rank = np.empty(len(score), int)
+        self.label_rank[self.label_priority] = np.arange(len(score))
+        self.label_sets = {}
+
+    def label_text(self, i):
+        text = self.labels[i]
+        if self.kinds[i] == "place":
+            text = text if len(text) <= 34 else "…" + text[-33:]
+            text = text.replace("\\", "＼")  # 日本語フォントは \ を ¥ の形で描くので、全角の＼にする
+        return text
+
+    def label_box(self, i, z):
+        """ズーム z の画面座標(px)でのラベルの範囲"""
+        S = SUPERSAMPLE
+        kind = self.kinds[i]
+        font = self.font(11 * S, bold=kind == "place")
+        l, t, r, b = font.getbbox(self.label_text(i))
+        w, h = (r - l) / S, (b - t) / S
+        cx, cy = self.world[i] * 2 ** z
+        if kind == "place":
+            return cx - w / 2 - 6, cy - h / 2 - 4, cx + w / 2 + 6, cy + h / 2 + 4
+        r0 = 2 + min(5, math.sqrt(self.degree[i]))
+        return cx - w / 2, cy + r0 + 2, cx + w / 2, cy + r0 + 4 + h
+
+    def labels_at(self, z):
+        """ズーム z でラベルを出す点(重要なものから順に置き、既に置いたラベルと重なるものは出さない)
+
+        画面全体の座標で決めるので、タイルの境目でラベルの有無が食い違わない(地図のラベル配置と同じ)。
+        """
+        if z in self.label_sets:
+            return self.label_sets[z]
+        cell = 64
+        grid = {}
+        shown = set()
+        for i in self.label_priority:
+            if self.kinds[i] == "episode":
+                break
+            box = self.label_box(i, z)
+            cells = [(cx, cy) for cx in range(int(box[0] // cell), int(box[2] // cell) + 1)
+                     for cy in range(int(box[1] // cell), int(box[3] // cell) + 1)]
+            if any(not (box[2] < o[0] or box[0] > o[2] or box[3] < o[1] or box[1] > o[3])
+                   for c in cells for o in grid.get(c, ())):
+                continue
+            for c in cells:
+                grid.setdefault(c, []).append(box)
+            shown.add(int(i))
+        self.label_sets[z] = shown
+        return shown
 
     # ---- タイル ----
 
@@ -222,7 +273,7 @@ class GraphMap:
         m = LABEL_MARGIN_PX / scale
         W = self.world
         near = np.where((W[:, 0] >= x0 - m) & (W[:, 0] <= x1 + m) & (W[:, 1] >= y0 - m) & (W[:, 1] <= y1 + m))[0]
-        labels_shown = int(8 * 3 ** z)
+        shown = self.labels_at(z)
         font = self.font(11 * S)
         font_place = self.font(11 * S, bold=True)
         for i in sorted(near, key=lambda i: -self.label_rank[i]):  # 重要なものを後に描いて上に出す
@@ -232,10 +283,10 @@ class GraphMap:
                 r = max(1, 2.5 * S * grow)
                 draw.ellipse([px - r, py - r, px + r, py + r], fill=th["hippo"] + (200,))
                 continue
-            label = self.label_rank[i] < labels_shown
+            label = int(i) in shown
             if kind == "place":
                 if label:
-                    text = self.labels[i] if len(self.labels[i]) <= 34 else "…" + self.labels[i][-33:]
+                    text = self.label_text(i)
                     l, t, r_, b_ = draw.textbbox((0, 0), text, font=font_place)
                     w, h = r_ - l, b_ - t
                     draw.rounded_rectangle([px - w / 2 - 6 * S, py - h / 2 - 4 * S, px + w / 2 + 6 * S, py + h / 2 + 4 * S],
@@ -248,7 +299,7 @@ class GraphMap:
             r = max(1.0, (2 + min(5, math.sqrt(self.degree[i]))) * S * grow)
             draw.ellipse([px - r, py - r, px + r, py + r], fill=th["node"] + (255,), outline=th["cortex"] + (255,), width=S)
             if label:
-                text = self.labels[i]
+                text = self.label_text(i)
                 l, t, r_, b_ = draw.textbbox((0, 0), text, font=font)
                 draw.text((px - (r_ - l) / 2 - l, py + r + 2 * S - t), text, font=font, fill=th["ink"] + (230,),
                           stroke_width=2 * S // 2, stroke_fill=th["halo"] + (200,))
