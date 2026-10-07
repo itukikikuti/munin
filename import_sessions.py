@@ -131,8 +131,9 @@ def places_of(cwd, edited, read):
     return places
 
 
-def read_turns(limit=None):
+def read_turns(limit=None, skip=()):
     """セッションを新しい順に読み、ユーザー指示ごとの出来事にまとめる"""
+    skip = {s.lower() for s in skip}
     turns = []
     seen = set()  # セッションを再開・分岐すると履歴がコピーされるので、同じ発言は1回だけ数える
     files = sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")), key=os.path.getmtime, reverse=True)
@@ -140,6 +141,8 @@ def read_turns(limit=None):
         if limit and len(turns) >= limit * 2:
             break  # 必要な件数が十分に集まった(並べ替えたあと新しい順に limit 件使う)
         print(f"\r  読み込み {i + 1}/{len(files)}", end="", file=sys.stderr, flush=True)
+        if path.lower() in skip:
+            continue
         cur = None
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -210,78 +213,132 @@ def unify_case(turns):
         t["files"] = list(dict.fromkeys(n for n in names if n))
 
 
-def main():
-    sys.stdout.reconfigure(encoding="utf-8")
-    limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
-    t0 = time.time()
-    turns = read_turns(limit)
+class Vocabulary:
+    """どの語を概念として覚えるか(その時点までに見たやり取りだけから判断する。未来の頻度は知らない)"""
+
+    def __init__(self):
+        self.turns = 0
+        self.df = Counter()           # 語ごとに、いくつの出来事に出てきたか
+        self.sdf = Counter()          # 語ごとに、いくつのセッションに出てきたか
+        self.session_terms = {}
+
+    def observe(self, t):
+        self.turns += 1
+        terms = set(t["user_terms"]) | set(t["reply_terms"]) | set(t["files"])
+        self.df.update(terms)
+        seen = self.session_terms.setdefault(t["session"], set())
+        self.sdf.update(terms - seen)
+        seen |= terms
+
+    def usable(self, w):
+        # 一度きりの語は雑音が多い。多くのセッションにまたがる語は、話題を表さないありふれた語
+        max_sdf = max(GENERIC_MIN_SESSIONS, len(self.session_terms) * GENERIC_SESSION_RATIO)
+        return self.df[w] >= MIN_DF and self.sdf[w] <= max_sdf
+
+    def pick(self, terms, k):
+        """TF-IDF の高い語から k 個"""
+        tf = Counter(terms)
+        scored = [(c * math.log(self.turns / self.df[w]), w) for w, c in tf.items() if self.usable(w)]
+        return [w for _, w in sorted(scored, reverse=True)[:k]]
+
+
+def analyze(t):
+    """やり取りから名詞を取り出しておく"""
+    if "user_terms" not in t:
+        t["user_terms"] = nouns(t["user"])
+        t["reply_terms"] = nouns("\n".join(t["reply"]))
+
+
+class Life:
+    """過去のやり取りを、実際の日時どおりに体験させる(日付が変わるたびに眠る)"""
+
+    def __init__(self, brain, first_turn):
+        self.brain = brain
+        self.vocab = Vocabulary()
+        start = parse_time(first_turn)
+        self.origin = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        self.day = self.day_of(start)
+        self.nights = 0
+        self.learned = 0
+
+    def hours(self, dt):
+        return (dt - self.origin).total_seconds() / 3600
+
+    @staticmethod
+    def day_of(dt):
+        return (dt - timedelta(hours=DAY_STARTS_AT)).date()  # 1日の区切りは午前4時(深夜の作業は前の日の続き)
+
+    def advance(self, t):
+        """そのやり取りの時刻まで時間を進める"""
+        at = parse_time(t)
+        b = self.brain
+        while self.day_of(at) > self.day:
+            # 日をまたいだ: その日の最後の作業のあとに眠る。
+            # 次の作業まで十分空いていれば、起きた時刻が次の作業の直前になるように眠り始める
+            self.day += timedelta(days=1)
+            b.now = max(b.now, min(self.hours(at) - SLEEP_HOURS,
+                                   self.hours(datetime.combine(self.day, datetime.min.time(), JST)) + DAY_STARTS_AT))
+            # 次の作業までの間しか眠れない(徹夜に近い夜は短い睡眠になる)
+            b.sleep(max(0.5, min(SLEEP_HOURS, self.hours(at) - b.now)))
+            self.nights += 1
+        b.now = max(b.now, self.hours(at))
+
+    def episode(self, t):
+        """やり取りを1つの出来事(一緒に覚える概念の組)にする"""
+        analyze(t)
+        self.vocab.observe(t)
+        v = self.vocab
+        concepts = (t["places"] + v.pick(t["user_terms"], USER_TERMS) + v.pick(t["reply_terms"], REPLY_TERMS)
+                    + [f for f in t["files"] if v.usable(f)][:MAX_FILES])
+        return list(dict.fromkeys(concepts))
+
+    def remember(self, t):
+        """やり取りを体験したあと、海馬に記録する"""
+        concepts = self.episode(t)
+        if len(concepts) >= 2:
+            self.brain.learn(concepts)
+            self.learned += 1
+
+    def experience(self, t):
+        self.advance(t)
+        self.remember(t)
+
+
+def parse_time(t):
+    return datetime.fromisoformat(t["t"].replace("Z", "+00:00")).astimezone(JST)
+
+
+def load_turns(limit=None, skip=()):
+    """セッションを読み、時刻順に並べる(limit があれば最近の limit 件)"""
+    turns = read_turns(limit, skip)
     turns.sort(key=lambda t: t["t"])
     if limit:
         turns = turns[-limit:]
     unify_case(turns)
+    return turns
+
+
+def main():
+    sys.stdout.reconfigure(encoding="utf-8")
+    limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
+    t0 = time.time()
+    turns = load_turns(limit)
     print(f"出来事 {len(turns)}件 ({turns[0]['t'][:10]} 〜 {turns[-1]['t'][:10]})")
 
-    # 形態素解析して、語ごとに「いくつの出来事に出てくるか」を数える
-    for i, t in enumerate(turns):
-        if i % 50 == 0:
-            print(f"\r  形態素解析 {i}/{len(turns)}", end="", file=sys.stderr, flush=True)
-        t["user_terms"] = nouns(t["user"])
-        t["reply_terms"] = nouns("\n".join(t["reply"]))
-    print(file=sys.stderr)
-    df = Counter()          # 語ごとに、いくつの出来事に出てくるか
-    session_terms = {}      # セッションごとに出てくる語
-    for t in turns:
-        terms = set(t["user_terms"]) | set(t["reply_terms"]) | set(t["files"])
-        df.update(terms)
-        session_terms.setdefault(t["session"], set()).update(terms)
-    sdf = Counter(w for terms in session_terms.values() for w in terms)
-    # 多くのセッションにまたがって出てくる語は、話題を表さないありふれた語
-    max_sdf = max(GENERIC_MIN_SESSIONS, len(session_terms) * GENERIC_SESSION_RATIO)
-    usable_term = lambda w: df[w] >= MIN_DF and sdf[w] <= max_sdf
-    print(f"セッション {len(session_terms)}件 / 語の種類 {len(df)} → 使う語 "
-          f"{sum(1 for w in df if usable_term(w))}")
-
-    def pick(terms, k):
-        tf = Counter(terms)
-        scored = [(c * math.log(len(turns) / df[w]), w) for w, c in tf.items() if usable_term(w)]
-        return [w for _, w in sorted(scored, reverse=True)[:k]]
-
-    # 実際の日時どおりに出来事を体験させ、日付が変わるたびに眠る
     if os.path.exists(STATE):
         os.remove(STATE)
     brain = Brain(STATE, embedder=None)
-    start = datetime.fromisoformat(turns[0]["t"].replace("Z", "+00:00")).astimezone(JST)
-    origin = start.replace(hour=0, minute=0, second=0, microsecond=0)
-    hours = lambda dt: (dt - origin).total_seconds() / 3600
-    # 1日の区切りは午前4時(深夜の作業は前の日の続き)
-    day_of = lambda dt: (dt - timedelta(hours=DAY_STARTS_AT)).date()
-    day = day_of(start)
-    learned = nights = 0
-    for t in turns:
-        at = datetime.fromisoformat(t["t"].replace("Z", "+00:00")).astimezone(JST)
-        while day_of(at) > day:
-            # 日をまたいだ: その日の最後の作業のあとに眠る。
-            # 次の作業まで十分空いていれば、起きた時刻が次の作業の直前になるように眠り始める
-            day += timedelta(days=1)
-            brain.now = max(brain.now, min(hours(at) - SLEEP_HOURS,
-                                           hours(datetime.combine(day, datetime.min.time(), JST))
-                                           + DAY_STARTS_AT))
-            # 次の作業までの間しか眠れない(徹夜に近い夜は短い睡眠になる)
-            brain.sleep(max(0.5, min(SLEEP_HOURS, hours(at) - brain.now)))
-            nights += 1
-        brain.now = max(brain.now, hours(at))
-        concepts = (t["places"] + pick(t["user_terms"], USER_TERMS)
-                    + pick(t["reply_terms"], REPLY_TERMS)
-                    + [f for f in t["files"] if usable_term(f)][:MAX_FILES])
-        concepts = list(dict.fromkeys(concepts))
-        if len(concepts) >= 2:
-            brain.learn(concepts)
-            learned += 1
+    life = Life(brain, turns[0])
+    for i, t in enumerate(turns):
+        if i % 50 == 0:
+            print(f"\r  体験 {i}/{len(turns)}", end="", file=sys.stderr, flush=True)
+        life.experience(t)
+    print(file=sys.stderr)
     brain.context = {}
     brain.save()
 
     places = {c for k in brain.cortex for c in k.split("\t") if c[:2].lower() == "c:" or c.startswith("/")}
-    print(f"海馬に入れた出来事 {learned}件 / 眠った回数 {nights}晩")
+    print(f"海馬に入れた出来事 {life.learned}件 / 眠った回数 {life.nights}晩")
     print(f"皮質のリンク {len(brain.cortex)}本 / 概念 {len(brain.known_concepts())}個 / "
           f"場所 {len(places)}か所 / 海馬に残っている記録 {len(brain.hippocampus)}件")
 
