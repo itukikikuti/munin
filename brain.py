@@ -76,18 +76,21 @@ class Brain:
         self.now = 0.0
         self.cortex = {}       # link_key -> {"w": 保存強度, "uses": [使用時刻]}
         self.hippocampus = []  # {"concepts": [...], "t": 記録時刻, "nights": 再生された晩数}
-        self.context = {}      # 概念 -> 最後に意識した時刻
+        self.context = {}      # 概念 -> [最後に意識した時刻, 注意を向けた順番]
+        self.seq = 0           # 注意を向けた回数(時刻が同じでも、どれが新しい話題か分かるように)
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 s = json.load(f)
             self.now = s["now"]
             self.cortex = s["cortex"]
             self.hippocampus = s["hippocampus"]
-            self.context = s["context"]
+            self.seq = s.get("seq", 0)
+            self.context = {c: v if isinstance(v, list) else [v, 0]
+                            for c, v in s["context"].items()}
 
     def save(self):
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"now": self.now, "cortex": self.cortex,
+            json.dump({"now": self.now, "seq": self.seq, "cortex": self.cortex,
                        "hippocampus": self.hippocampus, "context": self.context},
                       f, ensure_ascii=False, indent=1)
 
@@ -334,15 +337,16 @@ class Brain:
         いちばん新しい話題が注意の焦点。それより前の話題は、1つさかのぼるごとに弱まる。
         時間が経つと全体が薄れる。
         """
-        times = sorted(set(self.context.values()), reverse=True)
-        return {c: FOCUS_DECAY ** times.index(t) * 0.5 ** ((self.now - t) / CONTEXT_HALFLIFE)
-                for c, t in self.context.items()}
+        order = sorted({seq for _, seq in self.context.values()}, reverse=True)
+        return {c: FOCUS_DECAY ** order.index(seq) * 0.5 ** ((self.now - t) / CONTEXT_HALFLIFE)
+                for c, (t, seq) in self.context.items()}
 
     def attend(self, concepts):
         """ワーキングメモリに入れる。容量を超えたら古いものから押し出される"""
+        self.seq += 1
         for c in concepts:
-            self.context[c] = self.now
-        recent = sorted(self.context.items(), key=lambda x: -x[1])[:WM_CAPACITY]
+            self.context[c] = [self.now, self.seq]
+        recent = sorted(self.context.items(), key=lambda x: -x[1][1])[:WM_CAPACITY]
         self.context = dict(recent)
 
     # ---- 中身を見る ----
