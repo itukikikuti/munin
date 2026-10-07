@@ -58,28 +58,20 @@ button.danger { color: #c0392b; }
 .btns { display: flex; flex-wrap: wrap; gap: 6px; }
 #log { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 0; }
 #graphwrap { position: relative; }
-svg#graph { width: 100%; height: 720px; display: block; }
-@media (max-width: 900px) { svg#graph { height: 380px; } }
+#map { width: 100%; height: 720px; border-radius: 8px; }
+@media (max-width: 900px) { #map { height: 420px; } }
+.leaflet-container { background: var(--bg); font: inherit; }
+.leaflet-popup-content-wrapper, .leaflet-popup-tip, .leaflet-tooltip { background: var(--panel); color: var(--ink); border-color: var(--line); }
+.leaflet-popup-content { margin: 10px 14px; font-size: 13px; line-height: 1.6; }
+.leaflet-tooltip.act-label { font-size: 12px; padding: 2px 6px; border: 1px solid var(--accent); }
+.leaflet-tooltip.act-label.answer { border: 2px solid var(--place); font-weight: 700; }
+.leaflet-bar a { background: var(--panel); color: var(--ink); border-color: var(--line); }
+button.small { padding: 1px 10px; font-size: 12px; margin-left: 8px; }
 .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .legend span::before { content: ""; display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 5px; border-top: 3px solid var(--cortex); }
 .legend .lh::before { border-top: 2px dashed var(--hippo); }
 .legend .la::before { width: 10px; height: 10px; border: 0; border-radius: 50%; background: var(--accent); }
 .legend .lp::before { width: 10px; height: 10px; border: 0; border-radius: 2px; background: var(--place); }
-.empty { fill: var(--muted); font-size: 13px; }
-.edge { stroke: var(--cortex); stroke-linecap: round; transition: stroke .4s, opacity .4s; }
-.edge.hippo { stroke: var(--hippo); stroke-dasharray: 5 4; }
-.edge.lit { stroke: var(--accent); }
-.node circle, .node rect { fill: var(--node); stroke: var(--cortex); stroke-width: 1.5; }
-.node.place rect { stroke: var(--place); }
-.node .glow { fill: var(--accent); stroke: none; transition: opacity .6s; }
-.node.cue circle, .node.cue rect { stroke: var(--accent); stroke-width: 3; }
-.node.answer rect { stroke-width: 3; }
-.node text { fill: var(--ink); font-size: 12px; pointer-events: none; }
-.node.place text { font-family: Consolas, monospace; fill: var(--place); font-weight: 700; }
-.ep-node { fill: var(--hippo); }
-svg#graph { cursor: grab; touch-action: none; }
-svg#graph:active { cursor: grabbing; }
-.node .act { fill: var(--accent); font-size: 10px; font-weight: 700; }
 .ep { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .ep:first-of-type { border-top: 0; }
 .ep .c { flex: 1; min-width: 0; }
@@ -290,7 +282,7 @@ function renderOverlay() {
     const m = L.circleMarker(ll(n.world), {
       radius: 5 + n.act * 14, color: isAnswer ? place : n.cue ? accent : "#fff", weight: isAnswer || n.cue ? 3 : 1,
       fillColor: n.kind === "place" ? place : accent, fillOpacity: .35 + n.act * .65}).addTo(overlay);
-    const text = `${esc(n.kind === "place" ? n.id.replace(/\\/g, "\\") : n.id)} <b>${n.act.toFixed(2)}</b>`;
+    const text = `${esc(n.id)} <b>${n.act.toFixed(2)}</b>`;
     m.bindTooltip(text, {permanent: labelled.has(n.id), direction: "top", offset: [0, -6],
       className: `act-label ${isAnswer ? "answer" : ""}`});
   }
