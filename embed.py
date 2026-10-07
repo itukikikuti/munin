@@ -1,8 +1,11 @@
 """言葉を意味のベクトルに変える(Ollama の埋め込みモデル)
 
 脳で言えば、聞いた言葉の意味を捉えて、近い概念に結びつける入口の部分。
-概念のベクトルは一度計算したらファイルに保存し、次からは使い回す。
+  概念のベクトル : 概念の名前そのもの
+  要旨のベクトル : 指示や出来事の文全体(検索する側と同じ形にそろえるので、指示文を付けて計算する)
+どちらも一度計算したらファイルに保存し、次からは使い回す。
 """
+import hashlib
 import json
 import os
 import sys
@@ -18,25 +21,46 @@ EMBED_DIM = int(os.environ.get("EMBED_DIM", 4096))
 # qwen3-embedding は、検索する側の文に指示文を付けると精度が上がる
 QUERY_INSTRUCT = ("Instruct: Given a user's request about their work, "
                   "retrieve the concept names it refers to\nQuery: ")
+MAX_TEXT = 2000          # 貼り付けたログなどで長すぎる文は、先頭だけで要旨をとる
 BATCH = 64
+QUERY_BATCH = 16
+
+
+def gist_key(text):
+    """要旨のベクトルを保存するときの鍵"""
+    return "Q:" + hashlib.sha1(text[:MAX_TEXT].encode()).hexdigest()
 
 
 class Embedder:
     def __init__(self, cache_path):
-        """cache_path は拡張子なしの基準パス(.json に名前、.npy にベクトルを保存)"""
+        """cache_path は拡張子なしの基準パス(.json に鍵、.npy にベクトルを保存)"""
         self.base = os.path.splitext(cache_path)[0]
-        self.index = {}                                   # 概念 -> 行番号
-        self.matrix = np.zeros((0, EMBED_DIM), np.float32)
+        self.index = {}             # 鍵(概念の名前、または要旨の鍵) -> 行番号
+        self.rows = []              # 追加分のベクトル(必要になったときに行列へまとめる)
+        self._matrix = np.zeros((0, EMBED_DIM), np.float32)
+        self.dirty = False
         self.available = True
         self._last_query = None
         try:
             with open(self.base + ".json", encoding="utf-8") as f:
                 meta = json.load(f)
             if meta["model"] == EMBED_MODEL and meta["dim"] == EMBED_DIM:
-                self.matrix = np.load(self.base + ".npy")
+                self._matrix = np.load(self.base + ".npy")
                 self.index = {n: i for i, n in enumerate(meta["names"])}
         except (OSError, ValueError, KeyError):
             pass
+
+    @property
+    def matrix(self):
+        if self.rows:
+            self._matrix = np.vstack([self._matrix, np.array(self.rows, np.float32)])
+            self.rows = []
+        return self._matrix
+
+    def _add(self, key, vec):
+        self.index[key] = len(self._matrix) + len(self.rows)
+        self.rows.append(vec)
+        self.dirty = True
 
     def _request(self, texts):
         body = json.dumps({"model": EMBED_MODEL, "input": texts}).encode()
@@ -46,54 +70,72 @@ class Embedder:
             v = np.array(json.load(res)["embeddings"], np.float32)[:, :EMBED_DIM]
         return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
 
-    def _save(self):
+    def save(self):
+        if not self.dirty:
+            return
         names = sorted(self.index, key=self.index.get)
         np.save(self.base + ".npy", self.matrix)
         with open(self.base + ".json", "w", encoding="utf-8") as f:
             json.dump({"model": EMBED_MODEL, "dim": EMBED_DIM, "names": names}, f, ensure_ascii=False)
+        self.dirty = False
 
-    def ensure(self, names, progress=False):
-        """未計算の概念のベクトルを問い合わせる。使えなければ False"""
-        missing = [n for n in dict.fromkeys(names) if n not in self.index]
-        if not missing:
-            return True
+    def _fill(self, keys, inputs, batch, progress, label):
         try:
-            for i in range(0, len(missing), BATCH):
-                batch = missing[i:i + BATCH]
-                vecs = self._request(batch)
-                start = len(self.matrix)
-                self.matrix = np.vstack([self.matrix, vecs])
-                for j, n in enumerate(batch):
-                    self.index[n] = start + j
+            for i in range(0, len(keys), batch):
+                for k, v in zip(keys[i:i + batch], self._request(inputs[i:i + batch])):
+                    self._add(k, v)
                 if progress:
-                    print(f"\r  埋め込み {min(i + BATCH, len(missing))}/{len(missing)}",
-                          end="", file=sys.stderr, flush=True)
-            if progress:
+                    print(f"\r  {label} {min(i + batch, len(keys))}/{len(keys)}", end="", file=sys.stderr, flush=True)
+            if progress and keys:
                 print(file=sys.stderr)
-            self._save()
+            if keys:
+                self.save()
             return True
         except OSError:
             self.available = False
             return False
 
-    def query(self, text):
-        """検索する側の文のベクトル(直前に使った文は使い回す)"""
-        if self._last_query and self._last_query[0] == text:
+    def ensure(self, names, progress=False):
+        """未計算の概念のベクトルを問い合わせる。使えなければ False"""
+        missing = [n for n in dict.fromkeys(names) if n not in self.index]
+        return self._fill(missing, missing, BATCH, progress, "概念の埋め込み")
+
+    def ensure_gists(self, texts, progress=False):
+        """未計算の要旨のベクトルを問い合わせる。使えなければ False"""
+        todo = {gist_key(t): QUERY_INSTRUCT + t[:MAX_TEXT] for t in texts}
+        missing = [k for k in todo if k not in self.index]
+        return self._fill(missing, [todo[k] for k in missing], QUERY_BATCH, progress, "要旨の埋め込み")
+
+    def gist(self, text):
+        """文の要旨のベクトル(計算済みなら使い回す)。使えなければ None"""
+        key = gist_key(text)
+        if key in self.index:
+            i = self.index[key]
+            return self.matrix[i]
+        if self._last_query and self._last_query[0] == key:
             return self._last_query[1]
         try:
-            q = self._request([QUERY_INSTRUCT + text])[0]
+            q = self._request([QUERY_INSTRUCT + text[:MAX_TEXT]])[0]
         except OSError:
             self.available = False
             return None
-        self._last_query = (text, q)
+        self._last_query = (key, q)
         return q
 
-    def similarities(self, text, names):
-        """文と各概念の意味の近さ(コサイン類似度)。使えなければ None"""
-        if not self.ensure(names):
-            return None
-        q = self.query(text)
+    def remember_gist(self, text):
+        """覚える出来事の要旨のベクトルを保存し、鍵を返す"""
+        key = gist_key(text)
+        if key not in self.index:
+            v = self.gist(text)
+            if v is None:
+                return None
+            self._add(key, v)
+        return key
+
+    def similarities(self, text, keys):
+        """文と、各鍵(概念・要旨)の意味の近さ(コサイン類似度)。使えなければ None"""
+        q = self.gist(text)
         if q is None:
             return None
-        rows = np.array([self.index[n] for n in names])
-        return dict(zip(names, (self.matrix[rows] @ q).tolist()))
+        rows = np.fromiter((self.index[k] for k in keys), int, len(keys))
+        return self.matrix[rows] @ q
