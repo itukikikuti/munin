@@ -242,7 +242,7 @@ function renderCortex() {
 // 皮質の概念とリンクをすべて描く。海馬の記録は、出来事ごとに1つの点(索引)を置き、
 // そこから出来事に含まれる概念へ線を引く(海馬は記憶の中身ではなく、
 // 皮質に散らばった断片への索引を持つ、という海馬インデックス理論に沿った描き方)
-const epId = ep => `\u0000ep:${ep.t}:${ep.concepts.join("|")}`;
+const epId = ep => `\u0000ep:${ep.id}`;
 function buildGraph() {
   const ids = new Map(), nodes = [], edges = [];
   const add = (id, kind, label) => {

@@ -43,9 +43,9 @@ def snapshot(b):
     concepts = b.known_concepts()
     return {
         "now": b.now,
-        "hippocampus": [{"concepts": ep["concepts"], "strength": b.hippo_strength(ep),
+        "hippocampus": [{"id": i, "concepts": ep["concepts"], "strength": b.hippo_strength(ep),
                          "nights": ep["nights"], "t": ep["t"]}
-                        for ep in sorted(b.hippocampus, key=lambda e: -e["t"])],
+                        for i, ep in sorted(enumerate(b.hippocampus), key=lambda x: -x[1]["t"])],
         "hippocampus_total": len(b.hippocampus),
         "cortex": [{"a": k.split("\t")[0], "b": k.split("\t")[1], "w": link["w"],
                     "access": b.access(link), "eff": b.effective(link)} for k, link in b.cortex.items()],

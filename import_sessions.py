@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from janome.tokenizer import Tokenizer
 
-from brain import Brain
+from brain import SLEEP_HOURS, Brain
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
@@ -37,6 +37,7 @@ MAX_PLACES = 3
 MIN_DF = 2              # 2回以上の出来事に出てくる語だけ使う(一度きりの語は雑音が多い)
 GENERIC_SESSION_RATIO = 0.3   # 3割を超えるセッションに出てくる語は、ありふれていて手がかりにならない
 GENERIC_MIN_SESSIONS = 3
+DAY_STARTS_AT = 4       # 1日の区切り(時)
 
 STOPWORDS = set("""
 感じ 場合 状態 方法 必要 確認 修正 対応 問題 部分 内容 今回 以下 以上 一つ 二つ 全部 全体 結果 理由
@@ -236,17 +237,23 @@ def main():
     brain = Brain(STATE, embedder=None)
     start = datetime.fromisoformat(turns[0]["t"].replace("Z", "+00:00")).astimezone(JST)
     origin = start.replace(hour=0, minute=0, second=0, microsecond=0)
-    day = origin.date()
+    hours = lambda dt: (dt - origin).total_seconds() / 3600
+    # 1日の区切りは午前4時(深夜の作業は前の日の続き)
+    day_of = lambda dt: (dt - timedelta(hours=DAY_STARTS_AT)).date()
+    day = day_of(start)
     learned = nights = 0
     for t in turns:
         at = datetime.fromisoformat(t["t"].replace("Z", "+00:00")).astimezone(JST)
-        while at.date() > day:  # 日付が変わった: その夜に眠る
+        while day_of(at) > day:
+            # 日をまたいだ: その日の最後の作業のあとに眠る。
+            # 次の作業まで十分空いていれば、起きた時刻が次の作業の直前になるように眠り始める
             day += timedelta(days=1)
-            brain.now = max(brain.now, (datetime.combine(day, datetime.min.time(), JST) - origin)
-                            .total_seconds() / 3600)
+            brain.now = max(brain.now, min(hours(at) - SLEEP_HOURS,
+                                           hours(datetime.combine(day, datetime.min.time(), JST))
+                                           + DAY_STARTS_AT))
             brain.sleep()
             nights += 1
-        brain.now = max(brain.now, (at - origin).total_seconds() / 3600)
+        brain.now = max(brain.now, hours(at))
         concepts = (t["places"] + pick(t["user_terms"], USER_TERMS)
                     + pick(t["reply_terms"], REPLY_TERMS)
                     + [f for f in t["files"] if usable_term(f)][:MAX_FILES])
