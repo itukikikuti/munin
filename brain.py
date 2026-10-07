@@ -35,7 +35,12 @@ SPREAD_STEPS = 3
 SPREAD_DECAY = 0.8
 FAN_EXPONENT = 0.25          # つながりの多い概念ほど、1本あたりに流す活性を減らす度合い
 PRIMING = 0.5                # 直前の文脈にある概念の活性を最大で何割増しにするか
-CONTEXT_HALFLIFE = 2         # ワーキングメモリの半減期(時間)
+VAGUE_CUE = 0.8              # 手がかりの強さの合計がこれ未満なら「曖昧な指示」とみなす
+CONTEXT_WEIGHT = 0.6         # 曖昧な指示のとき、直前の文脈を手がかりにする強さ
+CONTEXT_HALFLIFE = 1         # ワーキングメモリの半減期(時間)
+WM_CAPACITY = 5              # ワーキングメモリに保てる概念の数(人間は 4±1 程度)
+FOCUS_DECAY = 0.3            # 注意の焦点から1つ前の話題に戻るごとに、強さが何倍になるか
+STRONG_CUE = 0.5             # これ以上の手がかりだけを、強化と文脈の対象にする
 RECALL_LR = 0.05             # 想起による強化
 MAX_USES = 50
 RECALL_THRESHOLD = 0.05
@@ -124,8 +129,7 @@ class Brain:
     def learn(self, concepts):
         concepts = list(dict.fromkeys(concepts))
         self.hippocampus.append({"concepts": concepts, "t": self.now, "nights": 0})
-        for c in concepts:
-            self.context[c] = self.now
+        self.attend(concepts)
 
     # ---- 睡眠(固定化) ----
 
@@ -223,6 +227,11 @@ class Brain:
         cues = sorted(cue_strength, key=lambda c: -cue_strength[c])
         sources = dict(cue_strength)
 
+        # 指示が曖昧なとき(「アプリのここ」など)は、今考えていることを指していると解釈する
+        if sum(cue_strength.values()) < VAGUE_CUE:
+            for c, a in self.working_memory().items():
+                sources[c] = max(sources.get(c, 0), CONTEXT_WEIGHT * a)
+
         # 海馬のパターン補完: 手がかりが一部でも合えば、記録全体が呼び起こされる
         # 多くの記録に共通する語(「アプリ」など)は、どれか1つを呼び起こす力が弱い
         count = {}
@@ -262,16 +271,17 @@ class Brain:
 
         # プライミング: 直前まで意識していた概念は、手がかりから届いた活性が割り増しになる
         # (文脈だけで何かを思い出すことはない)
-        for c, t in self.context.items():
+        for c, w in self.working_memory().items():
             if c in act:
-                act[c] = min(1.0, act[c] * (1 + PRIMING * 0.5 ** ((self.now - t) / CONTEXT_HALFLIFE)))
+                act[c] = min(1.0, act[c] * (1 + PRIMING * w))
 
         fragments = sorted(((n, a) for n, a in act.items()
                             if n not in cues and a >= RECALL_THRESHOLD),
                            key=lambda x: -x[1])
         answer = self.reconstruct(act, adj, cues)
         self.last_activation = act
-        self.reinforce(cues, answer, hippo_hits)
+        strong_cues = [c for c in cues if cue_strength[c] >= STRONG_CUE]
+        self.reinforce(strong_cues, answer, hippo_hits)
         return cues, fragments, answer
 
     def reconstruct(self, act, adj, cues=()):
@@ -316,8 +326,24 @@ class Brain:
         for ep in hippo_hits:
             if used & set(ep["concepts"]):
                 ep["t"] = self.now  # 思い出した海馬の記録は鮮明さを取り戻す
-        for c in used:
+        self.attend(used)
+
+    def working_memory(self):
+        """ワーキングメモリの各概念の強さ(0〜1)
+
+        いちばん新しい話題が注意の焦点。それより前の話題は、1つさかのぼるごとに弱まる。
+        時間が経つと全体が薄れる。
+        """
+        times = sorted(set(self.context.values()), reverse=True)
+        return {c: FOCUS_DECAY ** times.index(t) * 0.5 ** ((self.now - t) / CONTEXT_HALFLIFE)
+                for c, t in self.context.items()}
+
+    def attend(self, concepts):
+        """ワーキングメモリに入れる。容量を超えたら古いものから押し出される"""
+        for c in concepts:
             self.context[c] = self.now
+        recent = sorted(self.context.items(), key=lambda x: -x[1])[:WM_CAPACITY]
+        self.context = dict(recent)
 
     # ---- 中身を見る ----
 
