@@ -1,0 +1,15 @@
+# 記憶の状態(取り込みスクリプトで作り直せる)
+brain_state.json
+layout.json
+eval/
+
+# 埋め込みのキャッシュ(大きい。取り込みで作り直せる)
+embeddings.json
+embeddings.npy
+records_vectors.json
+records_vectors.npy
+
+# やり取りの記録(セッションの全文。個人の会話や業務の内容を含むので管理しない)
+records.sqlite
+
+__pycache__/
