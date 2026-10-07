@@ -23,6 +23,9 @@ SUPERSAMPLE = 2         # 2倍の大きさで描いて縮小し、線や文字�
 CACHE_TILES = 3000
 FONT = r"C:\Windows\Fonts\YuGothM.ttc"
 FONT_BOLD = r"C:\Windows\Fonts\YuGothB.ttc"
+# 線は半透明にして、重なるほど濃くなるようにする(線が密集したところが塗りつぶしにならないように)
+LINE_ALPHA_CORTEX = 70
+LINE_ALPHA_HIPPO = 60
 LABEL_MARGIN_PX = 160   # タイルの外にある点のラベルがはみ出してくる分も描く(タイルの境目でラベルが切れないように)
 
 THEMES = {
@@ -267,10 +270,10 @@ class GraphMap:
                 px, py = to_px(P[k])
                 qx, qy = to_px(Q[k])
                 if kind == 1:
-                    col = th["hippo"] + (int(40 + 120 * w),)
+                    col = th["hippo"] + (int(LINE_ALPHA_HIPPO * (0.4 + 0.6 * w)),)
                     width = max(1, round(1 * S * grow))
                 else:
-                    col = th["cortex"] + (int(30 + 170 * w),)
+                    col = th["cortex"] + (int(LINE_ALPHA_CORTEX * (0.3 + 0.7 * w)),)
                     width = max(1, round((0.6 + 3 * w) * S * grow))
                 draw.line([(px, py), (qx, qy)], fill=col, width=width)
 

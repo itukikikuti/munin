@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -25,7 +26,8 @@ LINKS_SHOWN = 200         # 画面の一覧に出す皮質のリンク(強い順
 
 brain = None
 mtime = None
-version = 0               # 図の作り直しが必要な変更があるたびに増える
+# 図の作り直しが必要な変更があるたびに増える。起動時刻から始めて、再起動前のタイルをブラウザが使い回さないようにする
+version = int(time.time())
 graph = GraphMap(os.path.join(HERE, "layout.json"))
 
 
