@@ -119,8 +119,10 @@ def main():
         truth = t["places"]
         _, _, mem = brain.recall(t["user"], use_context=False, reinforce=False)
         _, _, ctx = brain.recall(t["user"])
+        gate = brain.last_gate
         preds = base.predict(t)
         results.append({
+            "gate": gate,
             "t": t["t"], "prompt": t["user"][:200], "truth": truth,
             # 直前に作業していたのと別のプロジェクトに移った指示(ここで記憶の力が問われる)
             "switched": bool(truth) and base.prev is not None and base.prev not in {project(x) for x in truth},

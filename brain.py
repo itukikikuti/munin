@@ -395,6 +395,7 @@ class Brain:
         attention = {c: s * scale for c, s in cue_strength.items()}
         reinstated = {c: gist_budget * a for c, a in episodic.items()}
         self.last_episodic = reinstated
+        self.last_gate = gate
         wm = self.working_memory() if use_context else {}
         context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
 

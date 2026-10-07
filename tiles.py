@@ -33,6 +33,11 @@ THEMES = {
 }
 
 
+def text_px(z):
+    """ズーム z でのラベルの文字の大きさ(px)。拡大するほど少しずつ大きくする"""
+    return round(10 + 1.2 * z)
+
+
 def _font(path, size):
     try:
         return ImageFont.truetype(path, size)
@@ -182,7 +187,7 @@ class GraphMap:
         """ズーム z の画面座標(px)でのラベルの範囲"""
         S = SUPERSAMPLE
         kind = self.kinds[i]
-        font = self.font(11 * S, bold=kind == "place")
+        font = self.font(text_px(z) * S, bold=kind == "place")
         l, t, r, b = font.getbbox(self.label_text(i))
         w, h = (r - l) / S, (b - t) / S
         cx, cy = self.world[i] * 2 ** z
@@ -274,8 +279,8 @@ class GraphMap:
         W = self.world
         near = np.where((W[:, 0] >= x0 - m) & (W[:, 0] <= x1 + m) & (W[:, 1] >= y0 - m) & (W[:, 1] <= y1 + m))[0]
         shown = self.labels_at(z)
-        font = self.font(11 * S)
-        font_place = self.font(11 * S, bold=True)
+        font = self.font(text_px(z) * S)
+        font_place = self.font(text_px(z) * S, bold=True)
         for i in sorted(near, key=lambda i: -self.label_rank[i]):  # 重要なものを後に描いて上に出す
             px, py = to_px(W[i])
             kind = self.kinds[i]
