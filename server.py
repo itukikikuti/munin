@@ -1,6 +1,8 @@
 """記憶モデルをブラウザから操作するためのローカルサーバー(標準ライブラリのみ)
 
   python server.py  →  http://127.0.0.1:8770
+
+記憶は起動時に一度だけ読み込み、変更があるたびにファイルへ保存する。
 """
 import json
 import os
@@ -14,19 +16,51 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
 PORT = int(os.environ.get("PORT", 8770))
 AWAKE_HOURS = 16
-LOCK = threading.Lock()  # 状態ファイルの読み書きを1リクエストずつにする
+LOCK = threading.Lock()   # 記憶の読み書きを1リクエストずつにする
+TOP_LINKS = 150           # 画面に送る皮質のリンクの数(強い順)
+FOCUS_NODES = 40          # 想起したときに図に出す概念の数(活性の高い順)
+HIPPO_SHOWN = 60          # 画面に送る海馬の記録の数(新しい順)
+
+brain = None
+mtime = None
 
 
-def snapshot(brain):
+def load():
+    """記憶を読み込む(ファイルが外から書き換えられていたら読み直す)"""
+    global brain, mtime
+    m = os.path.getmtime(STATE) if os.path.exists(STATE) else None
+    if brain is None or m != mtime:
+        brain = Brain(STATE)
+        mtime = m
+    return brain
+
+
+def save():
+    global mtime
+    brain.save()
+    mtime = os.path.getmtime(STATE)
+
+
+def snapshot(b, activation=None):
+    links = sorted(b.cortex.items(), key=lambda x: -x[1]["w"])[:TOP_LINKS]
+    if activation:
+        focus = {n for n, _ in sorted(activation.items(), key=lambda x: -x[1])[:FOCUS_NODES]}
+        keys = {k for k, _ in links}
+        links += [(k, l) for k, l in b.cortex.items()
+                  if k not in keys and all(n in focus for n in k.split("\t"))]
+    concepts = b.known_concepts()
     return {
-        "now": brain.now,
-        "hippocampus": [{"concepts": ep["concepts"], "strength": brain.hippo_strength(ep),
-                         "nights": ep["nights"]} for ep in brain.hippocampus],
+        "now": b.now,
+        "hippocampus": [{"concepts": ep["concepts"], "strength": b.hippo_strength(ep),
+                         "nights": ep["nights"]}
+                        for ep in sorted(b.hippocampus, key=lambda e: -e["t"])[:HIPPO_SHOWN]],
+        "hippocampus_total": len(b.hippocampus),
         "cortex": [{"a": k.split("\t")[0], "b": k.split("\t")[1], "w": link["w"],
-                    "access": brain.access(link), "eff": brain.effective(link)}
-                   for k, link in brain.cortex.items()],
-        "context": list(brain.context),
-        "places": sorted(n for n in brain.known_concepts() if is_place(n)),
+                    "access": b.access(link), "eff": b.effective(link)} for k, link in links],
+        "cortex_total": len(b.cortex),
+        "concepts_total": len(concepts),
+        "places_total": sum(1 for n in concepts if is_place(n)),
+        "context": list(b.context),
     }
 
 
@@ -36,46 +70,52 @@ def handle(path, body):
 
 
 def _handle(path, body):
-    brain = Brain(STATE)
+    b = load()
     result = {}
+    activation = None
     if path == "/api/state":
         pass
     elif path == "/api/learn":
         concepts = [c.strip() for c in body.get("concepts", []) if c.strip()]
         if len(concepts) < 2:
             return 400, {"error": "関連する概念を2つ以上入力してください"}
-        brain.learn(concepts)
+        b.learn(concepts)
         result = {"log": [f"海馬に記録: {' / '.join(concepts)}"]}
     elif path == "/api/recall":
         text = body.get("text", "").strip()
         if not text:
             return 400, {"error": "指示を入力してください"}
-        cues, fragments, answer = brain.recall(text)
-        result = {"recall": {"text": text, "cues": cues, "cue_strength": brain.last_cues,
-                             "fragments": fragments, "answer": answer,
-                             "activation": brain.last_activation,
-                             "embedding": bool(brain.embedder and brain.embedder.available)}}
+        cues, fragments, answer = b.recall(text)
+        activation = b.last_activation
+        top = dict(sorted(activation.items(), key=lambda x: -x[1])[:FOCUS_NODES])
+        result = {"recall": {"text": text, "cues": cues, "cue_strength": b.last_cues,
+                             "fragments": fragments[:30], "answer": answer, "activation": top,
+                             "embedding": bool(b.embedder and b.embedder.available)}}
     elif path == "/api/sleep":
         log = []
         for i in range(max(1, min(60, int(body.get("nights", 1))))):
-            log.append(f"--- {i + 1}晩目 ---")
-            log += brain.sleep() or ["(再生なし)"]
-            brain.wait(AWAKE_HOURS)
+            report = b.sleep()
+            b.wait(AWAKE_HOURS)
+            moved = sum(1 for r in report if r.startswith("皮質へ"))
+            lost = sum(1 for r in report if r.startswith(("消失", "海馬から忘却")))
+            log.append(f"{i + 1}晩目: 再生 {sum(1 for r in report if r.startswith('再生'))}件 / "
+                       f"皮質へ移行 {moved}件 / 忘却 {lost}件")
         result = {"log": log}
     elif path == "/api/wait":
         hours = max(0.0, min(24 * 365, float(body.get("hours", 1))))
-        brain.wait(hours)
+        b.wait(hours)
         result = {"log": [f"{hours:g}時間経過"]}
     elif path == "/api/reset":
         if os.path.exists(STATE):
             os.remove(STATE)
-        brain = Brain(STATE)
+        global brain
+        brain = b = Brain(STATE)
         result = {"log": ["記憶をすべて消去しました"]}
     else:
         return 404, {"error": "not found"}
     if path != "/api/state":
-        brain.save()
-    result["state"] = snapshot(brain)
+        save()
+    result["state"] = snapshot(b, activation)
     return 200, result
 
 

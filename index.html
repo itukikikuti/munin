@@ -139,7 +139,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; font-we
 
   <div class="col">
     <section id="graphwrap">
-      <h2>記憶のネットワーク</h2>
+      <h2>記憶のネットワーク <span class="hint" id="graphNote"></span></h2>
       <svg id="graph"></svg>
       <div class="legend">
         <span>皮質のリンク(太さ = 実効強度)</span>
@@ -155,7 +155,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; font-we
       </section>
       <section>
         <details>
-          <summary>皮質のリンク一覧</summary>
+          <summary>皮質のリンク(強い順)</summary>
           <table id="cortex"></table>
         </details>
       </section>
@@ -189,7 +189,8 @@ function log(lines) {
 
 function renderClock() {
   const day = Math.floor(state.now / 24) + 1, hour = Math.floor(state.now % 24);
-  $("#clock").textContent = `${day}日目 ${hour}時`;
+  $("#clock").textContent = `${day}日目 ${hour}時 ・ 概念 ${state.concepts_total}個 / 場所 ${state.places_total}か所 / ` +
+    `皮質のリンク ${state.cortex_total}本 / 海馬 ${state.hippocampus_total}件`;
 }
 
 function renderResult() {
@@ -219,11 +220,12 @@ function renderResult() {
 
 function renderHippo() {
   const eps = state.hippocampus;
-  $("#hippo").innerHTML = eps.length ? eps.map(ep => `<div class="ep">
+  const more = state.hippocampus_total > eps.length ? `<p class="hint">新しい順に${eps.length}件を表示(全${state.hippocampus_total}件)</p>` : "";
+  $("#hippo").innerHTML = more + (eps.length ? eps.map(ep => `<div class="ep">
       <div class="c">${ep.concepts.map(esc).join(" / ")}</div>
       <div class="s"><span class="hint">鮮明さ ${ep.strength.toFixed(2)}</span><div class="meter"><i style="width:${ep.strength * 100}%"></i></div></div>
       <div class="n">${ep.nights}晩再生</div></div>`).join("")
-    : '<p class="hint">空(新しい記録はありません)</p>';
+    : '<p class="hint">空(新しい記録はありません)</p>');
 }
 
 function renderCortex() {
@@ -234,10 +236,20 @@ function renderCortex() {
 }
 
 // ---- ネットワーク図(簡易な力学モデルで配置) ----
+// 記憶が多いと全部は描けないので、想起したときは活性化した周辺だけ、
+// それ以外のときは最近の海馬の記録と、皮質の強いリンクだけを描く
+const GRAPH_LINKS = 40, GRAPH_EPISODES = 3;
 function buildGraph() {
   const nodes = new Set(), edges = [];
-  for (const l of state.cortex) { nodes.add(l.a); nodes.add(l.b); edges.push({a: l.a, b: l.b, w: l.eff, kind: "cortex"}); }
-  for (const ep of state.hippocampus) {
+  const act = lastRecall ? lastRecall.activation : null;
+  const inFocus = n => !act || n in act;
+  const links = act ? state.cortex.filter(l => inFocus(l.a) && inFocus(l.b))
+    : [...state.cortex].sort((x, y) => y.eff - x.eff).slice(0, GRAPH_LINKS);
+  if (act) Object.keys(act).forEach(n => nodes.add(n));
+  for (const l of links) { nodes.add(l.a); nodes.add(l.b); edges.push({a: l.a, b: l.b, w: l.eff, kind: "cortex"}); }
+  const eps = act ? state.hippocampus.filter(ep => ep.concepts.some(c => c in act && act[c] > .05))
+    : state.hippocampus.slice(0, GRAPH_EPISODES);
+  for (const ep of eps.map(ep => ({...ep, concepts: ep.concepts.filter(inFocus)}))) {
     ep.concepts.forEach(c => nodes.add(c));
     for (let i = 0; i < ep.concepts.length; i++)
       for (let j = i + 1; j < ep.concepts.length; j++)
@@ -297,6 +309,7 @@ function renderGraph() {
     return;
   }
   layout(nodes, edges);
+  $("#graphNote").textContent = lastRecall ? `・ 想起で活性化した上位${nodes.length}個` : `・ 強いリンクと最近の海馬の記録`;
   const act = lastRecall ? lastRecall.activation : {};
   const cues = new Set(lastRecall ? lastRecall.cues : []);
   const answer = lastRecall && lastRecall.answer.place;
