@@ -1,34 +1,42 @@
-"""記憶モデルをブラウザから操作するためのローカルサーバー(標準ライブラリのみ)
+"""記憶モデルをブラウザから操作するためのローカルサーバー
 
   python server.py  →  http://127.0.0.1:8770
 
 記憶は起動時に一度だけ読み込み、変更があるたびにファイルへ保存する。
+ネットワーク図はサーバー側でタイル画像に描き、ブラウザは表示している部分だけを読み込む。
 """
 import json
 import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from brain import Brain, is_place
+from tiles import GraphMap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
 PORT = int(os.environ.get("PORT", 8770))
 AWAKE_HOURS = 16
 LOCK = threading.Lock()   # 記憶の読み書きを1リクエストずつにする
+HIPPO_SHOWN = 60          # 画面の一覧に出す海馬の記録(新しい順)
+LINKS_SHOWN = 200         # 画面の一覧に出す皮質のリンク(強い順)
 
 brain = None
 mtime = None
+version = 0               # 図の作り直しが必要な変更があるたびに増える
+graph = GraphMap(os.path.join(HERE, "layout.json"))
 
 
 def load():
     """記憶を読み込む(ファイルが外から書き換えられていたら読み直す)"""
-    global brain, mtime
+    global brain, mtime, version
     m = os.path.getmtime(STATE) if os.path.exists(STATE) else None
     if brain is None or m != mtime:
         brain = Brain(STATE)
         mtime = m
+        version += 1
     return brain
 
 
@@ -38,21 +46,30 @@ def save():
     mtime = os.path.getmtime(STATE)
 
 
+def current_graph():
+    """図を今の記憶に合わせる(想起による小さな強化では作り直さない。覚える・眠るなどで作り直す)"""
+    with LOCK:
+        b = load()
+        v = version
+        if graph.version != v:
+            graph.update(b, v)
+    return graph
+
+
 def snapshot(b):
-    """画面に送る記憶の中身(ネットワーク図に全部描くので、すべて送る)"""
     concepts = b.known_concepts()
+    links = sorted(b.cortex.items(), key=lambda x: -x[1]["w"])[:LINKS_SHOWN]
     return {
         "now": b.now,
-        "hippocampus": [{"id": i, "concepts": ep["concepts"], "strength": b.hippo_strength(ep),
-                         "nights": ep["nights"], "t": ep["t"]}
-                        for i, ep in sorted(enumerate(b.hippocampus), key=lambda x: -x[1]["t"])],
+        "version": version,
+        "hippocampus": [{"concepts": ep["concepts"], "strength": b.hippo_strength(ep), "nights": ep["nights"]}
+                        for ep in sorted(b.hippocampus, key=lambda e: -e["t"])[:HIPPO_SHOWN]],
         "hippocampus_total": len(b.hippocampus),
         "cortex": [{"a": k.split("\t")[0], "b": k.split("\t")[1], "w": link["w"],
-                    "access": b.access(link), "eff": b.effective(link)} for k, link in b.cortex.items()],
+                    "access": b.access(link), "eff": b.effective(link)} for k, link in links],
         "cortex_total": len(b.cortex),
         "concepts_total": len(concepts),
         "places_total": sum(1 for n in concepts if is_place(n)),
-        "context": list(b.context),
     }
 
 
@@ -62,6 +79,7 @@ def handle(path, body):
 
 
 def _handle(path, body):
+    global version
     b = load()
     result = {}
     if path == "/api/state":
@@ -79,8 +97,9 @@ def _handle(path, body):
         cues, fragments, answer = b.recall(text)
         result = {"recall": {"text": text, "cues": cues, "cue_strength": b.last_cues,
                              "fragments": fragments[:30], "answer": answer,
-                             "activation": b.last_activation,
                              "embedding": bool(b.embedder and b.embedder.available)}}
+        if graph.version is not None:
+            result["recall"]["overlay"] = graph.overlay(b.last_activation, cues)
     elif path == "/api/sleep":
         log = []
         for i in range(max(1, min(60, int(body.get("nights", 1))))):
@@ -105,26 +124,43 @@ def _handle(path, body):
         return 404, {"error": "not found"}
     if path != "/api/state":
         save()
+        if path != "/api/recall":
+            version += 1
     result["state"] = snapshot(b)
     return 200, result
 
 
 class Handler(BaseHTTPRequestHandler):
-    def send(self, code, data, ctype="application/json; charset=utf-8"):
+    def send(self, code, data, ctype="application/json; charset=utf-8", cache=False):
         payload = data if isinstance(data, bytes) else json.dumps(data, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
+        # タイルは版(v)ごとに中身が決まるので、ブラウザにキャッシュさせてよい
+        self.send_header("Cache-Control", "max-age=86400" if cache else "no-store")
         self.end_headers()
         self.wfile.write(payload)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        url = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        if url.path in ("/", "/index.html"):
             with open(os.path.join(HERE, "index.html"), "rb") as f:
                 self.send(200, f.read(), "text/html; charset=utf-8")
+        elif url.path.startswith("/tiles/"):
+            try:
+                z, x, y = (int(p) for p in url.path[len("/tiles/"):].removesuffix(".png").split("/"))
+            except ValueError:
+                return self.send(404, {"error": "not found"})
+            g = current_graph()
+            self.send(200, g.tile(z, x, y, q.get("theme", "light")), "image/png", cache=True)
+        elif url.path == "/api/graph":
+            self.send(200, current_graph().meta())
+        elif url.path == "/api/node_at":
+            g = current_graph()
+            self.send(200, {"node": g.node_at(float(q["x"]), float(q["y"]), int(q["z"]))})
         else:
-            self.send(*handle(self.path, {}))
+            self.send(*handle(url.path, {}))
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -135,7 +171,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(400, {"error": str(e)})
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (self.command, self.path))
+        if not self.path.startswith("/tiles/"):
+            sys.stderr.write("%s %s\n" % (self.command, self.path))
 
 
 if __name__ == "__main__":
