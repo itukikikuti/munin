@@ -17,9 +17,6 @@ STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
 PORT = int(os.environ.get("PORT", 8770))
 AWAKE_HOURS = 16
 LOCK = threading.Lock()   # 記憶の読み書きを1リクエストずつにする
-TOP_LINKS = 150           # 画面に送る皮質のリンクの数(強い順)
-FOCUS_NODES = 40          # 想起したときに図に出す概念の数(活性の高い順)
-HIPPO_SHOWN = 60          # 画面に送る海馬の記録の数(新しい順)
 
 brain = None
 mtime = None
@@ -41,22 +38,17 @@ def save():
     mtime = os.path.getmtime(STATE)
 
 
-def snapshot(b, activation=None):
-    links = sorted(b.cortex.items(), key=lambda x: -x[1]["w"])[:TOP_LINKS]
-    if activation:
-        focus = {n for n, _ in sorted(activation.items(), key=lambda x: -x[1])[:FOCUS_NODES]}
-        keys = {k for k, _ in links}
-        links += [(k, l) for k, l in b.cortex.items()
-                  if k not in keys and all(n in focus for n in k.split("\t"))]
+def snapshot(b):
+    """画面に送る記憶の中身(ネットワーク図に全部描くので、すべて送る)"""
     concepts = b.known_concepts()
     return {
         "now": b.now,
         "hippocampus": [{"concepts": ep["concepts"], "strength": b.hippo_strength(ep),
-                         "nights": ep["nights"]}
-                        for ep in sorted(b.hippocampus, key=lambda e: -e["t"])[:HIPPO_SHOWN]],
+                         "nights": ep["nights"], "t": ep["t"]}
+                        for ep in sorted(b.hippocampus, key=lambda e: -e["t"])],
         "hippocampus_total": len(b.hippocampus),
         "cortex": [{"a": k.split("\t")[0], "b": k.split("\t")[1], "w": link["w"],
-                    "access": b.access(link), "eff": b.effective(link)} for k, link in links],
+                    "access": b.access(link), "eff": b.effective(link)} for k, link in b.cortex.items()],
         "cortex_total": len(b.cortex),
         "concepts_total": len(concepts),
         "places_total": sum(1 for n in concepts if is_place(n)),
@@ -72,7 +64,6 @@ def handle(path, body):
 def _handle(path, body):
     b = load()
     result = {}
-    activation = None
     if path == "/api/state":
         pass
     elif path == "/api/learn":
@@ -86,10 +77,9 @@ def _handle(path, body):
         if not text:
             return 400, {"error": "指示を入力してください"}
         cues, fragments, answer = b.recall(text)
-        activation = b.last_activation
-        top = dict(sorted(activation.items(), key=lambda x: -x[1])[:FOCUS_NODES])
         result = {"recall": {"text": text, "cues": cues, "cue_strength": b.last_cues,
-                             "fragments": fragments[:30], "answer": answer, "activation": top,
+                             "fragments": fragments[:30], "answer": answer,
+                             "activation": b.last_activation,
                              "embedding": bool(b.embedder and b.embedder.available)}}
     elif path == "/api/sleep":
         log = []
@@ -115,7 +105,7 @@ def _handle(path, body):
         return 404, {"error": "not found"}
     if path != "/api/state":
         save()
-    result["state"] = snapshot(b, activation)
+    result["state"] = snapshot(b)
     return 200, result
 
 

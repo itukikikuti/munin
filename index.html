@@ -56,7 +56,7 @@ button.danger { color: #c0392b; }
 .btns { display: flex; flex-wrap: wrap; gap: 6px; }
 #log { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 0; }
 #graphwrap { position: relative; }
-svg#graph { width: 100%; height: 520px; display: block; }
+svg#graph { width: 100%; height: 720px; display: block; }
 @media (max-width: 900px) { svg#graph { height: 380px; } }
 .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .legend span::before { content: ""; display: inline-block; width: 18px; height: 0; vertical-align: middle; margin-right: 5px; border-top: 3px solid var(--cortex); }
@@ -74,6 +74,9 @@ svg#graph { width: 100%; height: 520px; display: block; }
 .node.answer rect { stroke-width: 3; }
 .node text { fill: var(--ink); font-size: 12px; pointer-events: none; }
 .node.place text { font-family: Consolas, monospace; fill: var(--place); font-weight: 700; }
+.ep-node { fill: var(--hippo); }
+svg#graph { cursor: grab; touch-action: none; }
+svg#graph:active { cursor: grabbing; }
 .node .act { fill: var(--accent); font-size: 10px; font-weight: 700; }
 .ep { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .ep:first-of-type { border-top: 0; }
@@ -143,7 +146,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; font-we
       <svg id="graph"></svg>
       <div class="legend">
         <span>皮質のリンク(太さ = 実効強度)</span>
-        <span class="lh">海馬の結びつき</span>
+        <span class="lh">海馬の索引(青い点)から各概念へ</span>
         <span class="la">活性化</span>
         <span class="lp">場所</span>
       </div>
@@ -219,7 +222,7 @@ function renderResult() {
 }
 
 function renderHippo() {
-  const eps = state.hippocampus;
+  const eps = state.hippocampus.slice(0, 60);
   const more = state.hippocampus_total > eps.length ? `<p class="hint">新しい順に${eps.length}件を表示(全${state.hippocampus_total}件)</p>` : "";
   $("#hippo").innerHTML = more + (eps.length ? eps.map(ep => `<div class="ep">
       <div class="c">${ep.concepts.map(esc).join(" / ")}</div>
@@ -229,68 +232,116 @@ function renderHippo() {
 }
 
 function renderCortex() {
-  const rows = [...state.cortex].sort((x, y) => y.eff - x.eff);
+  const rows = [...state.cortex].sort((x, y) => y.eff - x.eff).slice(0, 200);
   $("#cortex").innerHTML = `<tr><th>リンク</th><th class="num">保存</th><th class="num">取出し</th><th class="num">実効</th></tr>` +
     (rows.length ? rows.map(l => `<tr><td>${esc(l.a)} - ${esc(l.b)}</td><td class="num">${l.w.toFixed(2)}</td><td class="num">${l.access.toFixed(2)}</td><td class="num">${l.eff.toFixed(2)}</td></tr>`).join("")
       : `<tr><td colspan="4" class="hint">空</td></tr>`);
 }
 
-// ---- ネットワーク図(簡易な力学モデルで配置) ----
-// 記憶が多いと全部は描けないので、想起したときは活性化した周辺だけ、
-// それ以外のときは最近の海馬の記録と、皮質の強いリンクだけを描く
-const GRAPH_LINKS = 40, GRAPH_EPISODES = 3;
+// ---- ネットワーク図 ----
+// 皮質の概念とリンクをすべて描く。海馬の記録は、出来事ごとに1つの点(索引)を置き、
+// そこから出来事に含まれる概念へ線を引く(海馬は記憶の中身ではなく、
+// 皮質に散らばった断片への索引を持つ、という海馬インデックス理論に沿った描き方)
+const epId = ep => `\u0000ep:${ep.t}:${ep.concepts.join("|")}`;
 function buildGraph() {
-  const nodes = new Set(), edges = [];
-  const act = lastRecall ? lastRecall.activation : null;
-  const inFocus = n => !act || n in act;
-  const links = act ? state.cortex.filter(l => inFocus(l.a) && inFocus(l.b))
-    : [...state.cortex].sort((x, y) => y.eff - x.eff).slice(0, GRAPH_LINKS);
-  if (act) Object.keys(act).forEach(n => nodes.add(n));
-  for (const l of links) { nodes.add(l.a); nodes.add(l.b); edges.push({a: l.a, b: l.b, w: l.eff, kind: "cortex"}); }
-  const eps = act ? state.hippocampus.filter(ep => ep.concepts.some(c => c in act && act[c] > .05))
-    : state.hippocampus.slice(0, GRAPH_EPISODES);
-  for (const ep of eps.map(ep => ({...ep, concepts: ep.concepts.filter(inFocus)}))) {
-    ep.concepts.forEach(c => nodes.add(c));
-    for (let i = 0; i < ep.concepts.length; i++)
-      for (let j = i + 1; j < ep.concepts.length; j++)
-        edges.push({a: ep.concepts[i], b: ep.concepts[j], w: ep.strength, kind: "hippo"});
+  const ids = new Map(), nodes = [], edges = [];
+  const add = (id, kind, label) => {
+    if (!ids.has(id)) { ids.set(id, nodes.length); nodes.push({id, kind, label, deg: 0}); }
+    return ids.get(id);
+  };
+  const concept = n => add(n, isPlace(n) ? "place" : "concept", n);
+  for (const l of state.cortex) edges.push({a: concept(l.a), b: concept(l.b), w: l.eff, kind: "cortex"});
+  for (const ep of state.hippocampus) {
+    const h = add(epId(ep), "episode", ep.concepts.join(" / "));
+    nodes[h].strength = ep.strength;
+    for (const c of ep.concepts) edges.push({a: h, b: concept(c), w: ep.strength, kind: "hippo"});
   }
-  return {nodes: [...nodes], edges};
+  for (const e of edges) { nodes[e.a].deg++; nodes[e.b].deg++; }
+  return {nodes, edges};
 }
 
-function layout(nodes, edges) {
-  for (const n of nodes) {
-    if (pos.has(n)) continue;
-    const nb = edges.find(e => (e.a === n && pos.has(e.b)) || (e.b === n && pos.has(e.a)));
-    const base = nb ? pos.get(nb.a === n ? nb.b : nb.a) : {x: 0, y: 0};
-    pos.set(n, {x: base.x + (Math.random() - .5) * 120, y: base.y + (Math.random() - .5) * 120});
+// 力学モデルで配置する。すでに配置済みの点は動かしすぎないよう、新しい点があるときだけ計算する
+function layout({nodes, edges}) {
+  const n = nodes.length;
+  const X = new Float64Array(n), Y = new Float64Array(n);
+  const adj = Array.from({length: n}, () => []);
+  for (const e of edges) { adj[e.a].push(e.b); adj[e.b].push(e.a); }
+  let fresh = 0;
+  const spread = Math.sqrt(n) * 40;
+  nodes.forEach((nd, i) => {
+    const p = pos.get(nd.id);
+    if (p) { X[i] = p.x; Y[i] = p.y; return; }
+    fresh++;
+    const nb = adj[i].map(j => pos.get(nodes[j].id)).find(Boolean);
+    X[i] = (nb ? nb.x : 0) + (Math.random() - .5) * (nb ? 80 : spread);
+    Y[i] = (nb ? nb.y : 0) + (Math.random() - .5) * (nb ? 80 : spread);
+  });
+  if (fresh || pos.size !== n) {
+    // 点の組の数 × 反復回数が一定以内に収まるよう、反復回数を決める
+    const full = fresh > n * 0.2;
+    const iters = Math.max(full ? 40 : 20, Math.min(full ? 300 : 60, Math.round(2e8 / (n * n))));
+    const FX = new Float64Array(n), FY = new Float64Array(n);
+    for (let it = 0; it < iters; it++) {
+      const t = 1 - it / iters;
+      FX.fill(0); FY.fill(0);
+      for (let i = 0; i < n; i++) {
+        const xi = X[i], yi = Y[i];
+        for (let j = i + 1; j < n; j++) {
+          const dx = xi - X[j], dy = yi - Y[j], d2 = dx * dx + dy * dy + .01;
+          const r = 6000 / (d2 * Math.sqrt(d2));
+          FX[i] += dx * r; FY[i] += dy * r; FX[j] -= dx * r; FY[j] -= dy * r;
+        }
+      }
+      for (const e of edges) {
+        const dx = X[e.b] - X[e.a], dy = Y[e.b] - Y[e.a], d = Math.sqrt(dx * dx + dy * dy) + .01;
+        const len = e.kind === "hippo" ? 60 : 110;
+        const s = (d - len) * 0.03 * (0.3 + e.w) / d;
+        FX[e.a] += dx * s; FY[e.a] += dy * s; FX[e.b] -= dx * s; FY[e.b] -= dy * s;
+      }
+      const lim = 25 * t + 1;
+      for (let i = 0; i < n; i++) {
+        let vx = FX[i] - X[i] * 0.004, vy = FY[i] - Y[i] * 0.004;
+        const m = Math.hypot(vx, vy);
+        if (m > lim) { vx *= lim / m; vy *= lim / m; }
+        X[i] += vx; Y[i] += vy;
+      }
+    }
   }
-  for (const k of [...pos.keys()]) if (!nodes.includes(k)) pos.delete(k);
-  for (let it = 0; it < 300; it++) {
-    const t = 1 - it / 300, f = new Map(nodes.map(n => [n, {x: 0, y: 0}]));
-    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
-      const p = pos.get(nodes[i]), q = pos.get(nodes[j]);
-      let dx = p.x - q.x, dy = p.y - q.y, d2 = dx * dx + dy * dy + .01, d = Math.sqrt(d2);
-      const rep = 9000 / d2;
-      f.get(nodes[i]).x += dx / d * rep; f.get(nodes[i]).y += dy / d * rep;
-      f.get(nodes[j]).x -= dx / d * rep; f.get(nodes[j]).y -= dy / d * rep;
-    }
-    for (const e of edges) {
-      const p = pos.get(e.a), q = pos.get(e.b);
-      const dx = q.x - p.x, dy = q.y - p.y, d = Math.sqrt(dx * dx + dy * dy) + .01;
-      const s = (d - 130) * 0.04 * (0.3 + e.w);
-      f.get(e.a).x += dx / d * s; f.get(e.a).y += dy / d * s;
-      f.get(e.b).x -= dx / d * s; f.get(e.b).y -= dy / d * s;
-    }
-    for (const n of nodes) {
-      const p = pos.get(n), v = f.get(n);
-      v.x -= p.x * 0.01; v.y -= p.y * 0.01;
-      const m = Math.hypot(v.x, v.y), lim = 20 * t + 1;
-      if (m > lim) { v.x *= lim / m; v.y *= lim / m; }
-      p.x += v.x; p.y += v.y;
-    }
-  }
+  pos.clear();
+  nodes.forEach((nd, i) => pos.set(nd.id, {x: X[i], y: Y[i]}));
 }
+
+// 拡大縮小(ホイール)と移動(ドラッグ)。ダブルクリックで全体表示に戻る
+let view = null, fitWanted = true;
+function fitView(nodes) {
+  const xs = nodes.map(nd => pos.get(nd.id).x), ys = nodes.map(nd => pos.get(nd.id).y);
+  const minX = Math.min(...xs) - 80, minY = Math.min(...ys) - 40;
+  view = {x: minX, y: minY, w: Math.max(...xs) + 80 - minX, h: Math.max(...ys) + 40 - minY};
+}
+function applyView() { $("#graph").setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`); }
+(function setupZoom() {
+  const svg = $("#graph");
+  svg.addEventListener("wheel", e => {
+    if (!view) return;
+    e.preventDefault();
+    const r = svg.getBoundingClientRect(), k = e.deltaY > 0 ? 1.2 : 1 / 1.2;
+    const s = Math.max(view.w / r.width, view.h / r.height);
+    const ox = view.x + (view.w - r.width * s) / 2, oy = view.y + (view.h - r.height * s) / 2;
+    const px = ox + (e.clientX - r.left) * s, py = oy + (e.clientY - r.top) * s;
+    view = {x: px - (px - view.x) * k, y: py - (py - view.y) * k, w: view.w * k, h: view.h * k};
+    applyView();
+  }, {passive: false});
+  let drag = null;
+  svg.addEventListener("pointerdown", e => { if (view) { drag = {x: e.clientX, y: e.clientY, v: {...view}}; svg.setPointerCapture(e.pointerId); } });
+  svg.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const r = svg.getBoundingClientRect(), s = Math.max(view.w / r.width, view.h / r.height);
+    view = {...drag.v, x: drag.v.x - (e.clientX - drag.x) * s, y: drag.v.y - (e.clientY - drag.y) * s};
+    applyView();
+  });
+  svg.addEventListener("pointerup", () => { drag = null; });
+  svg.addEventListener("dblclick", () => { fitWanted = true; renderGraph(); });
+})();
 
 function el(tag, attrs, parent) {
   const e = document.createElementNS(NS, tag);
@@ -308,45 +359,60 @@ function renderGraph() {
     el("text", {x: 200, y: 100, "text-anchor": "middle", class: "empty"}, svg).textContent = "まだ何も覚えていません。左の「覚える」から記録してください";
     return;
   }
-  layout(nodes, edges);
-  $("#graphNote").textContent = lastRecall ? `・ 想起で活性化した上位${nodes.length}個` : `・ 強いリンクと最近の海馬の記録`;
-  const act = lastRecall ? lastRecall.activation : {};
+  const t0 = performance.now();
+  layout({nodes, edges});
+  if (fitWanted || !view) { fitView(nodes); fitWanted = false; }
+  applyView();
+
+  const act = lastRecall ? lastRecall.activation : null;
+  const A = id => (act && act[id]) || 0;
   const cues = new Set(lastRecall ? lastRecall.cues : []);
   const answer = lastRecall && lastRecall.answer.place;
+  // 海馬の索引は、含む概念のどれかが活性化していれば光る
+  if (act) for (const e of edges) {
+    if (e.kind === "hippo") nodes[e.a].act = Math.max(nodes[e.a].act || 0, A(nodes[e.b].id));
+  }
+  const actOf = nd => nd.kind === "episode" ? (nd.act || 0) : A(nd.id);
+  const on = nd => !act || actOf(nd) > .05 || cues.has(nd.id);
+  // ラベル: 場所、活性化した概念、つながりの多い概念(上位)。それ以外はマウスを載せると出る
+  const topDeg = new Set(nodes.filter(nd => nd.kind === "concept").sort((x, y) => y.deg - x.deg).slice(0, 60).map(nd => nd.id));
 
-  const xs = nodes.map(n => pos.get(n).x), ys = nodes.map(n => pos.get(n).y);
-  const pad = 90, minX = Math.min(...xs) - pad, minY = Math.min(...ys) - 50;
-  svg.setAttribute("viewBox", `${minX} ${minY} ${Math.max(...xs) - minX + pad} ${Math.max(...ys) - minY + 50}`);
-
-  const gE = el("g", {}, svg), gN = el("g", {}, svg);
+  const P = nodes.map(nd => pos.get(nd.id));
+  let html = `<g>`;
   for (const e of edges) {
-    const p = pos.get(e.a), q = pos.get(e.b);
-    const lit = (act[e.a] || 0) > .05 && (act[e.b] || 0) > .05;
-    el("line", {x1: p.x, y1: p.y, x2: q.x, y2: q.y,
-      class: `edge ${e.kind === "hippo" ? "hippo" : ""} ${lit && e.kind === "cortex" ? "lit" : ""}`,
-      "stroke-width": e.kind === "hippo" ? 1.5 : 1 + e.w * 7,
-      opacity: e.kind === "hippo" ? .35 + e.w * .6 : .25 + e.w * .75}, gE);
+    const p = P[e.a], q = P[e.b], lit = act && on(nodes[e.a]) && on(nodes[e.b]);
+    const cls = `edge ${e.kind === "hippo" ? "hippo" : ""} ${lit && e.kind === "cortex" ? "lit" : ""}`;
+    const op = act ? (lit ? .9 : .04) : (e.kind === "hippo" ? .2 + e.w * .4 : .15 + e.w * .6);
+    const sw = e.kind === "hippo" ? 1 : .6 + e.w * 3;
+    html += `<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${q.x.toFixed(1)}" y2="${q.y.toFixed(1)}" class="${cls}" stroke-width="${sw.toFixed(2)}" opacity="${op.toFixed(2)}" vector-effect="non-scaling-stroke"/>`;
   }
-  for (const n of nodes) {
-    const p = pos.get(n), a = act[n] || 0, place = isPlace(n);
-    const g = el("g", {class: `node ${place ? "place" : ""} ${cues.has(n) ? "cue" : ""} ${n === answer ? "answer" : ""}`,
-      transform: `translate(${p.x},${p.y})`}, gN);
-    const title = el("title", {}, g); title.textContent = `${n}\n活性 ${a.toFixed(2)}`;
-    if (place) {
-      const w = Math.min(200, n.length * 7.5 + 20);
-      el("rect", {x: -w / 2, y: -14, width: w, height: 28, rx: 5}, g);
-      el("rect", {x: -w / 2, y: -14, width: w, height: 28, rx: 5, class: "glow", opacity: a * .45}, g);
-      el("text", {y: 4, "text-anchor": "middle"}, g).textContent = n.length > 26 ? n.slice(0, 25) + "…" : n;
-      if (a > .05) el("text", {y: -20, "text-anchor": "middle", class: "act"}, g).textContent = a.toFixed(2);
-    } else {
-      const r = 9;
-      el("circle", {r: r + a * 10, class: "glow", opacity: a * .35}, g);
-      el("circle", {r}, g);
-      el("circle", {r, class: "glow", opacity: a * .9}, g);
-      el("text", {y: r + 16, "text-anchor": "middle"}, g).textContent = n;
-      if (a > .05) el("text", {y: -r - a * 10 - 5, "text-anchor": "middle", class: "act"}, g).textContent = a.toFixed(2);
+  html += `</g><g>`;
+  nodes.forEach((nd, i) => {
+    const p = P[i], a = actOf(nd), dim = act && !on(nd) ? ` opacity=".15"` : "";
+    const title = `<title>${esc(nd.label)}${act ? `\n活性 ${a.toFixed(2)}` : ""}</title>`;
+    if (nd.kind === "episode") {
+      html += `<circle class="ep-node" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="5" opacity="${act ? (a > .05 ? 1 : .15) : .4 + nd.strength * .6}">${title}</circle>`;
+      return;
     }
-  }
+    const cls = `node ${nd.kind === "place" ? "place" : ""} ${cues.has(nd.id) ? "cue" : ""} ${nd.id === answer ? "answer" : ""}`;
+    html += `<g class="${cls}" transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})"${dim}>${title}`;
+    const label = nd.kind === "place" || a > .05 || cues.has(nd.id) || (!act && topDeg.has(nd.id));
+    if (nd.kind === "place") {
+      const text = nd.id.length > 34 ? "…" + nd.id.slice(-33) : nd.id, w = text.length * 7.5 + 20;
+      html += `<rect x="${-w / 2}" y="-14" width="${w}" height="28" rx="5"/><rect x="${-w / 2}" y="-14" width="${w}" height="28" rx="5" class="glow" opacity="${(a * .45).toFixed(2)}"/>` +
+        `<text y="4" text-anchor="middle">${esc(text)}</text>`;
+      if (a > .05) html += `<text y="-20" text-anchor="middle" class="act">${a.toFixed(2)}</text>`;
+    } else {
+      const r = 4 + Math.min(8, Math.sqrt(nd.deg));
+      html += `<circle r="${(r + a * 10).toFixed(1)}" class="glow" opacity="${(a * .35).toFixed(2)}"/><circle r="${r.toFixed(1)}"/><circle r="${r.toFixed(1)}" class="glow" opacity="${(a * .9).toFixed(2)}"/>`;
+      if (label) html += `<text y="${(r + 14).toFixed(1)}" text-anchor="middle">${esc(nd.id)}</text>`;
+      if (a > .05) html += `<text y="${(-r - a * 10 - 5).toFixed(1)}" text-anchor="middle" class="act">${a.toFixed(2)}</text>`;
+    }
+    html += `</g>`;
+  });
+  svg.innerHTML = html + `</g>`;
+  const nEp = nodes.filter(nd => nd.kind === "episode").length;
+  $("#graphNote").textContent = `・ 概念 ${nodes.length - nEp}個 / 海馬の索引 ${nEp}個 / 線 ${edges.length}本 (${Math.round(performance.now() - t0)}ms) ・ ホイールで拡大、ドラッグで移動、ダブルクリックで全体`;
 }
 
 function renderAll() {
