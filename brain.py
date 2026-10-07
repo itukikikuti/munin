@@ -426,14 +426,14 @@ class Brain:
         if not places or places[0][1] < RECALL_THRESHOLD:
             return {"place": None, "about": [], "confidence": 0, "ambiguous": [], "uncertain": False}
         best, level = places[0]
+        # 迷うかどうかは、どのプロジェクト(場所)かの段階で決める
+        ambiguous = [n for n, a in places[1:] if not is_inside(n, best) and a >= level * AMBIGUITY_RATIO]
         # 中のフォルダまで具体的に思い出せるなら(検索閾値を超えていれば)、そちらを答えにする
         # (親フォルダの活性は、中のフォルダでの出来事から受け継いだ分を含むので高く出やすい)
         inner = [(n, a) for n, a in places if is_inside(n, best)
                  and a >= max(RETRIEVAL_TAU, level * INNER_PLACE_RATIO)]
         if inner:
             best, level = inner[0]
-        rivals = [(n, a) for n, a in places if n != best and not is_inside(best, n)]
-        ambiguous = [n for n, a in rivals if a >= level * AMBIGUITY_RATIO]
         # 検索確率(ACT-R): 活性が検索閾値を超えるほど、確かに思い出せる
         conf = 1 / (1 + math.exp(-(level - RETRIEVAL_TAU) / RETRIEVAL_S))
 

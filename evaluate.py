@@ -16,15 +16,15 @@ STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
 
 # (指示, 正しい場所の候補。None は「思い出さないのが正しい」)
 CASES = [
-    ("記憶モデルのサーバーを直して", [r"C:\dev\brain-memory"]),
-    ("海馬の仕組み", [r"C:\dev\brain-memory"]),
-    ("給与奉行のCSV", [r"C:\dev\work", r"C:\dev\work\batch\マネーフォワード連携"]),
-    ("マネーフォワード連携", [r"C:\dev\work\batch\マネーフォワード連携", r"C:\dev\work"]),
-    ("立替金の通知", [r"C:\dev\work", r"C:\dev\work\batch\マネーフォワード連携"]),
-    ("Nucleoの波形", [r"C:\dev\ET"]),
-    ("オシロの設定", [r"C:\dev\ET"]),
-    ("RAGのチャンク", [r"C:\dev\rag-agent-demo"]),
-    ("JavaScript研修の台本", [r"C:\Users\me\Documents\obsidian\20_案件\JavaScript研修",
+    ("記憶モデルのサーバーを直して", [r"C:\dev\brain-memory*"]),
+    ("海馬の仕組み", [r"C:\dev\brain-memory*"]),
+    ("給与奉行のCSV", [r"C:\dev\work*"]),
+    ("マネーフォワード連携", [r"C:\dev\work\batch\マネーフォワード連携*", r"C:\dev\work"]),
+    ("立替金の通知", [r"C:\dev\work*"]),
+    ("Nucleoの波形", [r"C:\dev\ET*"]),
+    ("オシロの設定", [r"C:\dev\ET*"]),
+    ("RAGのチャンク", [r"C:\dev\rag-agent-demo*"]),
+    ("JavaScript研修の台本", [r"C:\Users\me\Documents\obsidian\20_案件\JavaScript研修*",
                           r"C:\Users\me\Documents\obsidian"]),
     ("今日の天気", None),
     ("晩ご飯の献立", None),
@@ -32,11 +32,11 @@ CASES = [
 
 
 # 文脈: 先に話題を出してから、曖昧な指示をする(最後の指示の答えを確かめる)
-JS_DIR = r"C:\Users\me\Documents\obsidian\20_案件\JavaScript研修"
+JS_DIR = r"C:\Users\me\Documents\obsidian\20_案件\JavaScript研修*"
 SEQUENCES = [
-    (["RAGのチャンク", "このツールの設定を変えて"], [r"C:\dev\rag-agent-demo"]),
+    (["RAGのチャンク", "このツールの設定を変えて"], [r"C:\dev\rag-agent-demo*"]),
     (["JavaScript研修の台本", "それの続きを書いて"], [JS_DIR]),
-    (["RAGのチャンク", "Nucleoの波形", "それの出力を見たい"], [r"C:\dev\ET"]),  # 話題が切り替わった
+    (["RAGのチャンク", "Nucleoの波形", "それの出力を見たい"], [r"C:\dev\ET*"]),  # 話題が切り替わった
     (["Nucleoの波形", "今日の天気"], None),                                     # 文脈と無関係な話
 ]
 
