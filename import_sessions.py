@@ -33,7 +33,7 @@ JST = timezone(timedelta(hours=9))
 USER_TERMS = 6          # 1回の指示から取り出す語の数
 REPLY_TERMS = 6         # Claude の返答から取り出す語の数
 MAX_FILES = 5
-MAX_PLACES = 3
+MAX_PLACES = 4
 MIN_DF = 2              # 2回以上の出来事に出てくる語だけ使う(一度きりの語は雑音が多い)
 GENERIC_SESSION_RATIO = 0.3   # 3割を超えるセッションに出てくる語は、ありふれていて手がかりにならない
 GENERIC_MIN_SESSIONS = 3
@@ -107,15 +107,24 @@ def project_root(path):
     return None
 
 
-def places_of(cwd, file_paths):
-    """作業フォルダと触ったファイルから、記憶する場所を決める"""
+def places_of(cwd, edited, read):
+    """作業フォルダと触ったファイルから、記憶する場所を決める
+
+    編集したファイルは、そのファイルのあるフォルダまで覚える(どこで作業したかの具体的な場所)。
+    読んだだけのファイルは数が多いので、プロジェクトのルートだけ覚える。
+    """
     places = []
     if cwd and not ignored_place(cwd):
         places.append(cwd)
         root = project_root(cwd)
         if root:
             places.append(root)
-    for fp in file_paths:
+    for fp in edited:
+        root = project_root(fp)
+        if root and not ignored_place(fp):
+            folder = os.path.dirname(fp)
+            places += [folder, root] if folder.lower() != root.lower() else [root]
+    for fp in read:
         root = project_root(fp)
         if root and not ignored_place(fp):
             places.append(root)
@@ -189,7 +198,7 @@ def unify_case(turns):
     # 場所(プロジェクトのルート)も同じようにそろえる
     roots = Counter()
     for t in turns:
-        t["places"] = places_of(t["cwd"], t["edited"] + t["read"])
+        t["places"] = places_of(t["cwd"], t["edited"], t["read"])
         roots.update(t["places"])
     best = {}
     for p, c in roots.items():

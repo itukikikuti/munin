@@ -49,7 +49,7 @@ RECALL_THRESHOLD = 0.02       # これ未満の活性は、何も思い浮かば
 RETRIEVAL_TAU = 0.05          # 検索閾値(ACT-R の τ)。活性がこれを超えると、思い出せる確率が5割を超える
 RETRIEVAL_S = 0.015           # 検索確率の、閾値付近でのなだらかさ(ACT-R の s)
 AMBIGUITY_RATIO = 0.8         # 2位がこの比率以上なら「迷う」
-INNER_PLACE_RATIO = 0.6       # 中のフォルダの活性が親のこの比率以上なら、中のフォルダを答えにする
+INNER_PLACE_RATIO = 0.2       # 中のフォルダの活性が親のこの比率以上(かつ検索閾値以上)なら、中のフォルダを答えにする
 SEM_TOPK = 5                 # 意味が近い概念を最大いくつ手がかりにするか
 SEM_MAX = 0.8                # 意味が近いだけの手がかりの最大強度(名前の一致は 1.0)
 SEM_Z_MIN = 2.0              # 他の概念より何σ高ければ手がかりにし始めるか
@@ -348,7 +348,6 @@ class Brain:
         context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
 
         act_cue, hits = self.activate(attention)
-        # 文脈そのものを思い出したことにはせず、そこから結びついた記憶へ活性を送るだけ
         act_ctx, ctx_hits = self.activate(context)
         if referential:
             # 指示が今の話題を指している: 文脈から届いた記憶も、そのまま思い浮かぶ
@@ -427,9 +426,10 @@ class Brain:
         if not places or places[0][1] < RECALL_THRESHOLD:
             return {"place": None, "about": [], "confidence": 0, "ambiguous": [], "uncertain": False}
         best, level = places[0]
-        # フォルダとその中のフォルダが両方思い浮かんだら、具体的な中のフォルダを答えにする
-        # (親フォルダの活性は、中のフォルダでの出来事から受け継いだ分であることが多い)
-        inner = [(n, a) for n, a in places if is_inside(n, best) and a >= level * INNER_PLACE_RATIO]
+        # 中のフォルダまで具体的に思い出せるなら(検索閾値を超えていれば)、そちらを答えにする
+        # (親フォルダの活性は、中のフォルダでの出来事から受け継いだ分を含むので高く出やすい)
+        inner = [(n, a) for n, a in places if is_inside(n, best)
+                 and a >= max(RETRIEVAL_TAU, level * INNER_PLACE_RATIO)]
         if inner:
             best, level = inner[0]
         rivals = [(n, a) for n, a in places if n != best and not is_inside(best, n)]

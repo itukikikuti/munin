@@ -9,7 +9,7 @@ import os
 import sys
 import time
 
-from brain import Brain, is_place
+from brain import Brain, is_inside, is_place
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
@@ -63,7 +63,9 @@ def main():
         _, _, ans = b.recall(texts[-1])
         dt = time.time() - t
         got = ans["place"] if not ans["uncertain"] else None
-        hit = (got is None) if expected is None else (got in expected)
+        # 末尾が * の候補は、その中のフォルダも正解(プロジェクトの中の具体的な場所を答えてよい)
+        hit = (got is None) if expected is None else got is not None and any(
+            got == e.rstrip("*") or (e.endswith("*") and is_inside(got, e.rstrip("*"))) for e in expected)
         ok += hit
         cues = ", ".join(f"{c}={v:.2f}" for c, v in sorted(b.last_cues.items(), key=lambda x: -x[1])[:6])
         places = sorted(((n, a) for n, a in b.last_activation.items() if is_place(n)), key=lambda x: -x[1])[:3]
