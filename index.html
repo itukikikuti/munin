@@ -328,7 +328,7 @@ function renderGraph() {
       el("circle", {r}, g);
       el("circle", {r, class: "glow", opacity: a * .9}, g);
       el("text", {y: r + 16, "text-anchor": "middle"}, g).textContent = n;
-      if (a > .05) el("text", {y: -r - 6, "text-anchor": "middle", class: "act"}, g).textContent = a.toFixed(2);
+      if (a > .05) el("text", {y: -r - a * 10 - 5, "text-anchor": "middle", class: "act"}, g).textContent = a.toFixed(2);
     }
   }
 }
