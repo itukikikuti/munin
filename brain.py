@@ -214,6 +214,7 @@ class Brain:
                             if n not in cues and a >= RECALL_THRESHOLD),
                            key=lambda x: -x[1])
         answer = self.reconstruct(act, adj)
+        self.last_activation = act
         self.reinforce(cues, answer, hippo_hits)
         return cues, fragments, answer
 
