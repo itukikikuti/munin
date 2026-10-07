@@ -31,32 +31,57 @@ INTERLEAVE_LR = 0.05         # 古い記憶を混ぜて再生するときの強�
 DOWNSCALE = 0.97             # 睡眠中のシナプス整理(全体を少し弱める)
 PRUNE_BELOW = 0.02           # これ以下のリンクは消える
 SLEEP_HOURS = 8
-SPREAD_STEPS = 3
-SPREAD_DECAY = 0.8
-FAN_EXPONENT = 0.25          # つながりの多い概念ほど、1本あたりに流す活性を減らす度合い
-PRIMING = 0.5                # 直前の文脈にある概念の活性を最大で何割増しにするか
-VAGUE_CUE = 0.8              # 手がかりの強さの合計がこれ未満なら「曖昧な指示」とみなす
-CONTEXT_WEIGHT = 0.6         # 曖昧な指示のとき、直前の文脈を手がかりにする強さ
+ASSOC_FREQ_WEIGHT = 1.0      # 連合強度で「よく一緒に出てくるか」を「特に結びついているか」に対してどれだけ重視するか
+CONTEXT_MIN = 0.3            # 手がかりがはっきりしていても、ワーキングメモリに向ける注意の最低量
 CONTEXT_HALFLIFE = 1         # ワーキングメモリの半減期(時間)
 WM_CAPACITY = 5              # ワーキングメモリに保てる概念の数(人間は 4±1 程度)
 FOCUS_DECAY = 0.3            # 注意の焦点から1つ前の話題に戻るごとに、強さが何倍になるか
 STRONG_CUE = 0.5             # これ以上の手がかりだけを、強化と文脈の対象にする
 RECALL_LR = 0.05             # 想起による強化
 EXACT_USES = 3               # 取り出しやすさの計算で、時刻を正確に覚えておく直近の使用回数
-RECALL_THRESHOLD = 0.05
-AMBIGUITY_RATIO = 0.8        # 2位がこの比率以上なら「曖昧」
-LOW_CONFIDENCE = 0.15        # これ未満なら「うろ覚え」
+RECALL_THRESHOLD = 0.02       # これ未満の活性は、何も思い浮かばないのと同じ
+RETRIEVAL_TAU = 0.05          # 検索閾値(ACT-R の τ)。活性がこれを超えると、思い出せる確率が5割を超える
+RETRIEVAL_S = 0.015           # 検索確率の、閾値付近でのなだらかさ(ACT-R の s)
+AMBIGUITY_RATIO = 0.8         # 2位がこの比率以上なら「迷う」
+INNER_PLACE_RATIO = 0.6       # 中のフォルダの活性が親のこの比率以上なら、中のフォルダを答えにする
 SEM_TOPK = 5                 # 意味が近い概念を最大いくつ手がかりにするか
 SEM_MAX = 0.8                # 意味が近いだけの手がかりの最大強度(名前の一致は 1.0)
 SEM_Z_MIN = 2.0              # 他の概念より何σ高ければ手がかりにし始めるか
 SEM_Z_FULL = 4.0             # 何σ高ければ最大強度にするか
 SEM_WITH_EXACT = 0.5         # 名前の一致があるときの、連想による手がかりの割合
+SEM_ABS_MIN = 0.5            # 類似度がこれ以下なら、どれだけ際立っていても手がかりにしない
+SEM_ABS_FULL = 0.65          # 類似度がこれ以上なら、絶対値の面では十分に近い
 
 PLACE_RE = re.compile(r"^([A-Za-z]:[\\/]|/|~[\\/])")
 
 
 def is_place(name):
     return bool(PLACE_RE.match(name))
+
+
+_tokenizer = None
+
+
+def word_boundaries(text):
+    """文を語に区切ったときの、語の境目の位置(形態素解析。使えなければ全位置を境目とみなす)"""
+    global _tokenizer
+    try:
+        if _tokenizer is None:
+            from janome.tokenizer import Tokenizer
+            _tokenizer = Tokenizer()
+    except ImportError:
+        return set(range(len(text) + 1))
+    bounds, pos = {0}, 0
+    for tok in _tokenizer.tokenize(text, wakati=True):
+        pos += len(tok)
+        bounds.add(pos)
+    return bounds
+
+
+def is_inside(inner, outer):
+    """inner が outer の中のフォルダか"""
+    i, o = inner.lower().rstrip("\\/"), outer.lower().rstrip("\\/")
+    return i != o and (i.startswith(o + "\\") or i.startswith(o + "/"))
 
 
 def link_key(a, b):
@@ -224,12 +249,22 @@ class Brain:
            (類似度はその文の中での相対的な高さで判断する。無関係な文では何も選ばない)
         """
         found = {}
-        rest = text.lower()
+        low = text.lower()
+        bounds = word_boundaries(text)
+        used = [False] * len(low)
         known = self.known_concepts()
         for name in sorted(known, key=len, reverse=True):
-            if name.lower() in rest:
-                found[name] = 1.0
-                rest = rest.replace(name.lower(), " ")
+            n = name.lower()
+            i = low.find(n)
+            while i >= 0:
+                end = i + len(n)
+                # 語の境目にそろっていて、まだ他の名前に使われていない部分だけ一致とみなす
+                # (「マネーフォワード」の中の「ワード」は一致にしない)
+                if i in bounds and end in bounds and not any(used[i:end]):
+                    found[name] = 1.0
+                    used[i:end] = [True] * len(n)
+                    break
+                i = low.find(n, i + 1)
 
         if self.embedder and known:
             sims = self.embedder.similarities(text, sorted(known))
@@ -238,8 +273,10 @@ class Brain:
                 std = math.sqrt(sum((s - mean) ** 2 for s in sims.values()) / len(sims)) or 1.0
                 top = sorted(sims.items(), key=lambda x: -x[1])[:SEM_TOPK]
                 z_top = (top[0][1] - mean) / std
-                # 一番近い概念の強さは、どれだけ際立っているかで決める
+                # 一番近い概念の強さは、どれだけ際立っているか(相対)と、
+                # 類似度そのものの高さ(絶対)の両方で決める
                 base = SEM_MAX * min(1.0, max(0.0, (z_top - SEM_Z_MIN) / (SEM_Z_FULL - SEM_Z_MIN)))
+                base *= min(1.0, max(0.0, (top[0][1] - SEM_ABS_MIN) / (SEM_ABS_FULL - SEM_ABS_MIN)))
                 if found:
                     base *= SEM_WITH_EXACT  # 名前が直接出ているなら、連想は控えめに
                 for name, s in top:
@@ -256,12 +293,18 @@ class Brain:
         cue_strength = self.perceive(text)
         self.last_cues = cue_strength
         cues = sorted(cue_strength, key=lambda c: -cue_strength[c])
-        sources = dict(cue_strength)
+        # 注意の分配(ACT-R): 注意の総量は一定で、手がかりが多いほど1つあたりは弱くなる
+        total = sum(cue_strength.values())
+        attention = {c: s / max(1.0, total) for c, s in cue_strength.items()}
+        sources = dict(attention)
 
-        # 指示が曖昧なとき(「アプリのここ」など)は、今考えていることを指していると解釈する
-        if sum(cue_strength.values()) < VAGUE_CUE:
-            for c, a in self.working_memory().items():
-                sources[c] = max(sources.get(c, 0), CONTEXT_WEIGHT * a)
+        # ワーキングメモリ(今考えていること)も活性の発生源になる。指示が曖昧なほど
+        # (「アプリのここ」など)、手がかりに使われなかった注意が文脈に向く。
+        # 文脈そのものを思い出したことにはせず、そこから結びついた記憶へ活性を送るだけ
+        wm = self.working_memory()
+        budget = max(CONTEXT_MIN, 1 - min(1.0, total))
+        context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
+        senders = {**context, **attention}
 
         # 海馬のパターン補完: 手がかりが一部でも合えば、記録全体が呼び起こされる
         # 多くの記録に共通する語(「アプリ」など)は、どれか1つを呼び起こす力が弱い
@@ -271,8 +314,8 @@ class Brain:
                 count[c] = count.get(c, 0) + 1
         hippo_hits = []
         for ep in self.hippocampus:
-            match = min(1.0, sum(cue_strength[c] / count[c] for c in ep["concepts"]
-                                 if c in cue_strength))
+            match = min(1.0, sum(senders[c] / count[c] for c in ep["concepts"]
+                                 if c in senders))
             if match <= 0:
                 continue
             a = match * self.hippo_strength(ep)
@@ -280,31 +323,29 @@ class Brain:
             for c in ep["concepts"]:
                 sources[c] = max(sources.get(c, 0), a * 0.9)
 
-        # 皮質の活性化拡散: 手がかりから波のように外へ広がる
-        # 各概念が活性を送り出すのは1回だけ(密な概念群の中で活性がこだまして膨らまないように)
-        # つながりの多い概念ほど、1本あたりに流れる量は減る
+        # 皮質の活性化拡散(ACT-R): 手がかりから、つながった概念へ1段だけ活性が流れる。
+        # 流れる量は連合強度 S_ji = ln(P(i|j) / P(i))(Anderson の合理的分析)で決まる:
+        #   P(i|j) … 手がかり j があるときに概念 i が必要になる確率(j のつながりの中での i の割合)
+        #   P(i)   … 普段から i が必要になる確率(i のつながりの多さ)
+        # つながりの多い手がかりは P(i|j) が小さく(ファン効果)、何にでも出てくる概念は
+        # P(i) が大きいので、どちらも強度が下がる。手がかりと特に結びついた概念にだけ活性が届く。
+        # ただし比率だけだと、一度たまたま一緒に出てきた珍しい概念が過大評価されるので、
+        # 実際によく一緒に出てくるか(P(i|j))でも重み付けする
         adj = self.neighbors()
+        degree = {n: sum(eff for _, eff in links) for n, links in adj.items()}
+        total = sum(degree.values()) or 1.0
+        scale = math.log(max(2, len(adj)))  # ln(lift) の最大値の目安で 0〜1 にそろえる
         act = dict(sources)
-        fired = set()
-        wave = dict(sources)
-        for _ in range(SPREAD_STEPS):
-            incoming = {}
-            for node, a in wave.items():
-                fired.add(node)
-                links = adj.get(node, [])
-                fan = max(1, len(links)) ** FAN_EXPONENT
-                for nb, eff in links:
-                    if nb not in sources:
-                        incoming[nb] = incoming.get(nb, 0) + a * eff * SPREAD_DECAY / fan
-            for n, a in incoming.items():
-                act[n] = min(1.0, act.get(n, 0) + a)
-            wave = {n: act[n] for n in incoming if n not in fired}
-
-        # プライミング: 直前まで意識していた概念は、手がかりから届いた活性が割り増しになる
-        # (文脈だけで何かを思い出すことはない)
-        for c, w in self.working_memory().items():
-            if c in act:
-                act[c] = min(1.0, act[c] * (1 + PRIMING * w))
+        for j, a in {**context, **sources}.items():
+            if degree.get(j, 0) <= 0:
+                continue
+            for i, eff in adj[j]:
+                if i in sources or eff <= 0:
+                    continue
+                p_ij = eff / degree[j]
+                s = p_ij ** ASSOC_FREQ_WEIGHT * math.log(p_ij / (degree[i] / total)) / scale
+                if s > 0:
+                    act[i] = min(1.0, act.get(i, 0) + a * s)
 
         fragments = sorted(((n, a) for n, a in act.items()
                             if n not in cues and a >= RECALL_THRESHOLD),
@@ -317,12 +358,20 @@ class Brain:
 
     def reconstruct(self, act, adj, cues=()):
         """活性の高い断片から答えを組み立てる"""
-        active = {n: a for n, a in act.items() if a >= RECALL_THRESHOLD}
+        active = {n: a for n, a in act.items() if a > 0}
         places = sorted(((n, a) for n, a in active.items() if is_place(n)), key=lambda x: -x[1])
-        if not places:
+        if not places or places[0][1] < RECALL_THRESHOLD:
             return {"place": None, "about": [], "confidence": 0, "ambiguous": [], "uncertain": False}
-        best, conf = places[0]
-        ambiguous = [n for n, a in places[1:] if a >= conf * AMBIGUITY_RATIO]
+        best, level = places[0]
+        # フォルダとその中のフォルダが両方思い浮かんだら、具体的な中のフォルダを答えにする
+        # (親フォルダの活性は、中のフォルダでの出来事から受け継いだ分であることが多い)
+        inner = [(n, a) for n, a in places if is_inside(n, best) and a >= level * INNER_PLACE_RATIO]
+        if inner:
+            best, level = inner[0]
+        rivals = [(n, a) for n, a in places if n != best and not is_inside(best, n)]
+        ambiguous = [n for n, a in rivals if a >= level * AMBIGUITY_RATIO]
+        # 検索確率(ACT-R): 活性が検索閾値を超えるほど、確かに思い出せる
+        conf = 1 / (1 + math.exp(-(level - RETRIEVAL_TAU) / RETRIEVAL_S))
 
         # 断片どうしのつながり(皮質のリンク + 海馬の記録)
         linked = {n: set() for n in active}
@@ -341,8 +390,8 @@ class Brain:
             return (places_linked > 2, n not in cues, places_linked, -active[n])
         about = sorted((n for n in linked.get(best, ()) if n in active and not is_place(n)),
                        key=specificity)[:1]
-        return {"place": best, "about": about, "confidence": conf, "ambiguous": ambiguous,
-                "uncertain": conf < LOW_CONFIDENCE}
+        return {"place": best, "about": about, "confidence": conf, "activation": level,
+                "ambiguous": ambiguous, "uncertain": conf < 0.5}
 
     def reinforce(self, cues, answer, hippo_hits):
         """想起による強化: 実際に使ったつながりが強まる"""
