@@ -26,7 +26,6 @@ NIGHTS_TO_INDEPENDENCE = 3   # 何晩再生されたら海馬なしで思い出�
 REPLAYS_PER_NIGHT = 3
 CONSOLIDATE_LR = 0.15        # 1回の再生で皮質リンクが強まる割合
 INTERLEAVE_LR = 0.05         # 古い記憶を混ぜて再生するときの強化
-INTERLEAVE_COUNT = 10
 DOWNSCALE = 0.97             # 睡眠中のシナプス整理(全体を少し弱める)
 PRUNE_BELOW = 0.02           # これ以下のリンクは消える
 SLEEP_HOURS = 8
@@ -133,11 +132,10 @@ class Brain:
             report.append(f"再生: {' / '.join(ep['concepts'])} ({ep['nights']}晩目)")
 
         # 古い記憶も混ぜて再生し、新しい知識で上書きされないようにする
-        old = sorted((k for k in self.cortex if k not in touched),
-                     key=lambda k: -self.effective(self.cortex[k]))[:INTERLEAVE_COUNT]
-        for key in old:
-            link = self.cortex[key]
-            link["w"] += INTERLEAVE_LR * self.access(link) * (1 - link["w"])
+        # 取り出しやすい記憶ほど再生されやすく、使わない記憶は再生されずに薄れていく
+        for key, link in self.cortex.items():
+            if key not in touched:
+                link["w"] += INTERLEAVE_LR * self.access(link) * (1 - link["w"])
 
         # シナプス整理: 全体を少し弱め、弱すぎるリンクは消す
         for key in list(self.cortex):
@@ -185,9 +183,14 @@ class Brain:
             sources[c] = max(sources.get(c, 0), a)
 
         # 海馬のパターン補完: 手がかりが一部でも合えば、記録全体が呼び起こされる
+        # 多くの記録に共通する語(「アプリ」など)は、どれか1つを呼び起こす力が弱い
+        count = {}
+        for ep in self.hippocampus:
+            for c in ep["concepts"]:
+                count[c] = count.get(c, 0) + 1
         hippo_hits = []
         for ep in self.hippocampus:
-            match = min(1.0, sum(sources.get(c, 0) for c in ep["concepts"]))
+            match = min(1.0, sum(1 / count[c] for c in ep["concepts"] if c in cues))
             if match <= 0:
                 continue
             a = match * self.hippo_strength(ep)
@@ -210,22 +213,35 @@ class Brain:
         fragments = sorted(((n, a) for n, a in act.items()
                             if n not in cues and a >= RECALL_THRESHOLD),
                            key=lambda x: -x[1])
-        answer = self.reconstruct(fragments, adj)
+        answer = self.reconstruct(act, adj)
         self.reinforce(cues, answer, hippo_hits)
         return cues, fragments, answer
 
-    def reconstruct(self, fragments, adj):
+    def reconstruct(self, act, adj):
         """活性の高い断片から答えを組み立てる"""
-        places = [(n, a) for n, a in fragments if is_place(n)]
+        active = {n: a for n, a in act.items() if a >= RECALL_THRESHOLD}
+        places = sorted(((n, a) for n, a in active.items() if is_place(n)), key=lambda x: -x[1])
         if not places:
-            return {"place": None, "about": [f for f, _ in fragments[:3]], "confidence": 0,
-                    "ambiguous": []}
+            return {"place": None, "about": [], "confidence": 0, "ambiguous": []}
         best, conf = places[0]
         ambiguous = [n for n, a in places[1:] if a >= conf * AMBIGUITY_RATIO]
-        # その場所と強く結びついている、活性の高い概念を「何の場所か」とする
-        frag = dict(fragments)
-        about = sorted((nb for nb, _ in adj.get(best, []) if nb in frag),
-                       key=lambda n: -frag[n])[:3]
+
+        # 断片どうしのつながり(皮質のリンク + 海馬の記録)
+        linked = {n: set() for n in active}
+        for a, nbs in adj.items():
+            for b, _ in nbs:
+                linked.setdefault(a, set()).add(b)
+        for ep in self.hippocampus:
+            for a, b in combinations(ep["concepts"], 2):
+                linked.setdefault(a, set()).add(b)
+                linked.setdefault(b, set()).add(a)
+
+        # 「何の場所か」: その場所とつながる概念のうち、他の場所とはつながらない固有のもの
+        def specificity(n):
+            places_linked = sum(1 for m in linked.get(n, ()) if is_place(m))
+            return (places_linked, -active[n])
+        about = sorted((n for n in linked.get(best, ()) if n in active and not is_place(n)),
+                       key=specificity)[:1]
         return {"place": best, "about": about, "confidence": conf, "ambiguous": ambiguous}
 
     def reinforce(self, cues, answer, hippo_hits):
@@ -267,7 +283,8 @@ def format_recall(cues, fragments, answer):
     lines = [f"手がかり: {', '.join(cues) or '(なし)'}"]
     lines.append("活性化: " + ", ".join(f"{n}({a:.2f})" for n, a in fragments[:6]))
     if answer["place"]:
-        line = f"想起: {' / '.join(answer['about'])} の場所は {answer['place']} (確信度 {answer['confidence']:.2f})"
+        what = f"{answer['about'][0]} の場所は" if answer["about"] else "場所は"
+        line = f"想起: {what} {answer['place']} (確信度 {answer['confidence']:.2f})"
         if answer["ambiguous"]:
             line += f"  ※ {', '.join(answer['ambiguous'])} とも迷う"
         lines.append(line)
