@@ -28,6 +28,7 @@ class Embedder:
         self.index = {}                                   # 概念 -> 行番号
         self.matrix = np.zeros((0, EMBED_DIM), np.float32)
         self.available = True
+        self._last_query = None
         try:
             with open(self.base + ".json", encoding="utf-8") as f:
                 meta = json.load(f)
@@ -75,14 +76,24 @@ class Embedder:
             self.available = False
             return False
 
-    def similarities(self, text, names):
-        """文と各概念の意味の近さ(コサイン類似度)。使えなければ None"""
-        if not self.ensure(names):
-            return None
+    def query(self, text):
+        """検索する側の文のベクトル(直前に使った文は使い回す)"""
+        if self._last_query and self._last_query[0] == text:
+            return self._last_query[1]
         try:
             q = self._request([QUERY_INSTRUCT + text])[0]
         except OSError:
             self.available = False
+            return None
+        self._last_query = (text, q)
+        return q
+
+    def similarities(self, text, names):
+        """文と各概念の意味の近さ(コサイン類似度)。使えなければ None"""
+        if not self.ensure(names):
+            return None
+        q = self.query(text)
+        if q is None:
             return None
         rows = np.array([self.index[n] for n in names])
         return dict(zip(names, (self.matrix[rows] @ q).tolist()))
