@@ -42,6 +42,20 @@ GIST_Z_MIN = 1.5             # 一番近い痕跡が、他より何σ高けれ�
 GIST_Z_FULL = 3.5
 GIST_ABS_MIN = 0.4           # 一番近い痕跡の類似度がこれ以下なら、呼び起こさない
 GIST_ABS_FULL = 0.6
+# 関連することを思い出す(出来事の活性 A = 要旨 + 概念 + 新しさ、確かさは ACT-R の検索確率)
+EP_W_GIST = 1.0              # 要旨の意味の近さの重み
+EP_W_CONCEPT = 0.6           # 出来事に含まれる概念の活性の重み
+EP_W_BASE = 0.15             # 新しさ(基本活性化)の重み
+EP_DECAY = 0.5               # 新しさの減り方(ACT-R の d)
+EP_TAU = 0.6                 # 出来事の検索閾値
+EP_S = 0.12                  # 出来事の検索確率の、閾値付近でのなだらかさ
+CHOICE_T = 0.03              # 場所の選択規則の温度(ACT-R の t)。小さいほど1位が選ばれやすい
+SHOW_CONF = 0.5              # この確かさ以上のものだけ差し込む
+PLACE_SHOW_CONF = 0.2
+EPISODES_SHOWN = 5
+CONCEPTS_SHOWN = 15
+PLACES_SHOWN = 3
+RECENT_SHOWN = 3
 DEICTIC_CONTEXT = 0.6        # 指示語(「この」「それ」など)があるとき、ワーキングメモリに向ける注意
 OMITTED_CONTEXT = 0.8        # 対象が省かれている(「直して」だけ)とき、ワーキングメモリに向ける注意
 ZIPF_COMMON = 5.5            # この頻度(Zipf)以上の日常語は、手がかりとしてほぼ役に立たない
@@ -126,6 +140,33 @@ def content_words(text):
         if pos[0] == "名詞" and pos[1] not in ("代名詞", "非自立", "接尾", "数") and not DEICTIC.fullmatch(tok.surface):
             words.append(tok.surface)
     return words
+
+
+def retrieval_probability(a, tau, s):
+    """検索確率(ACT-R): 活性 a が閾値 tau を超えるほど、確かに思い出せる"""
+    return 1 / (1 + math.exp(-(a - tau) / s))
+
+
+def recollection_text(r):
+    """思い出したことを、依頼に差し込む文章にする"""
+    lines = []
+    if r["recent"]:
+        lines.append("直前の作業:")
+        lines += [f"- {e['when']} {' '.join(e['places'])} 依頼「{e['prompt']}」" for e in r["recent"]]
+    if r["episodes"]:
+        lines.append("関係しそうな過去のやり取り(確かさ順):")
+        for e in r["episodes"]:
+            line = f"- {e['when']} {' '.join(e['places'])} 依頼「{e['prompt']}」"
+            if e["reply"]:
+                line += f" → 回答「{e['reply']}」"
+            lines.append(line + f" (確かさ {e['conf']:.2f})")
+    if r["places"]:
+        lines.append("関係しそうな場所: " + ", ".join(f"{p['name']} ({p['conf']:.2f})" for p in r["places"]))
+    if r["concepts"]:
+        lines.append("関連する語・ファイル: " + ", ".join(c["name"] for c in r["concepts"]))
+    if not lines:
+        return ""
+    return "<思い出したこと>\n" + "\n".join(lines) + "\n</思い出したこと>"
 
 
 def is_inside(inner, outer):
@@ -426,6 +467,91 @@ class Brain:
             self.reinforce(strong_cues, answer, hits)
         return cues, fragments, answer
 
+    # ---- 関連することを思い出す(依頼に差し込む記憶) ----
+
+    def recollect(self, text, use_context=True, reinforce=True):
+        """依頼に関連することを思い出す
+
+        記憶力の良い人が、依頼を聞いて関連することを思い出すのと同じように、
+          出来事 : 関係のありそうな過去のやり取り(そのときの依頼と回答の抜粋)
+          概念   : 関連する語やファイル
+          場所   : 関連するフォルダ
+          直近   : 新しい会話の最初なら、直前に何をしていたか
+        を思い出し、それぞれに確かさ(ACT-R の検索確率)を付ける。text は差し込み用の文章。
+        """
+        new_conversation = not self.context
+        cues, _, answer = self.recall(text, use_context, reinforce=False)
+        act = self.last_activation
+        cue_set = set(cues)
+
+        episodes = self.rank_episodes(act)
+        concepts = [{"name": n, "conf": retrieval_probability(a, RETRIEVAL_TAU, RETRIEVAL_S)}
+                    for n, a in sorted(act.items(), key=lambda x: -x[1])
+                    if not is_place(n) and n not in cue_set and a >= RECALL_THRESHOLD][:CONCEPTS_SHOWN]
+        places = self.rank_places(act)
+        recent = []
+        if new_conversation:
+            # 直前と同じ: 新しい会話の最初は、直前に何をしていたかを思い出しておく
+            recent = [self.episode_view(tr, None) for tr in sorted(self.traces, key=lambda tr: -tr["t"])[:RECENT_SHOWN]]
+
+        result = {"episodes": [e for e in episodes if e["conf"] >= SHOW_CONF][:EPISODES_SHOWN],
+                  "concepts": [c for c in concepts if c["conf"] >= SHOW_CONF],
+                  "places": [p for p in places if p["conf"] >= PLACE_SHOW_CONF][:PLACES_SHOWN],
+                  "recent": recent, "cues": cues, "answer": answer}
+        result["text"] = recollection_text(result)
+        if reinforce:
+            strong_cues = [c for c in cues if self.last_cues[c] >= STRONG_CUE]
+            self.reinforce(strong_cues, answer, [])
+            for e in result["episodes"]:  # 思い出した出来事は、次も思い出しやすくなる
+                tr = e["trace"]
+                tr["uses"] = (tr.get("uses", []) + [self.now])[-EXACT_USES:]
+        for e in result["episodes"] + result["recent"]:
+            e.pop("trace", None)
+        return result
+
+    def rank_episodes(self, act):
+        """出来事(エピソード記憶の痕跡)を、ACT-R の活性 A = 基本活性化 + 拡散活性化 で並べる
+
+          要旨   : 依頼と出来事の要旨の意味の近さ(他の出来事と比べてどれだけ際立つか)
+          概念   : 出来事に含まれる概念が、今どれだけ活性化しているか(語のつながり・文脈を経由)
+          新しさ : 基本活性化 ln(Σ 経過時間^-d)。最近の出来事、最近思い出した出来事ほど高い
+        """
+        z = getattr(self, "last_trace_z", {})
+        concept_score = [sum(act.get(c, 0) for c in tr["concepts"]) for tr in self.traces]
+        top_c = max(concept_score, default=0) or 1.0
+        ranked = []
+        for tr, cs in zip(self.traces, concept_score):
+            gist = min(1.5, max(0.0, z.get(id(tr), 0.0) / GIST_Z_FULL))
+            base = math.log(sum((self.now - u + 1) ** -EP_DECAY for u in [tr["t"]] + tr.get("uses", [])))
+            a = EP_W_GIST * gist + EP_W_CONCEPT * cs / top_c + EP_W_BASE * base
+            ranked.append((a, tr))
+        ranked.sort(key=lambda x: -x[0])
+        return [self.episode_view(tr, retrieval_probability(a, EP_TAU, EP_S)) for a, tr in ranked[:EPISODES_SHOWN * 4]]
+
+    def episode_view(self, tr, conf):
+        return {"trace": tr, "conf": conf, "when": (tr.get("time") or "")[:16].replace("T", " "),
+                "prompt": tr.get("prompt", " / ".join(tr["concepts"])), "reply": tr.get("reply", ""),
+                "places": [c for c in tr["concepts"] if is_place(c)][:2], "concepts": tr["concepts"]}
+
+    def rank_places(self, act):
+        """関連する場所の確かさ = 思い出せる確率 × ほかの場所との競合で選ばれる確率(ACT-R の選択規則)
+
+        競合はプロジェクト単位で考える(あるフォルダと、その中のフォルダは競合しない)。
+        """
+        places = sorted(((n, a) for n, a in act.items() if is_place(n) and a > 0), key=lambda x: -x[1])
+        top = {}  # プロジェクト(他のどの場所の中でもない場所) -> 活性
+        group = {}
+        for n, a in places:
+            root = next((r for r in top if is_inside(n, r)), None)
+            if root is None:
+                top[n] = a
+                root = n
+            group[n] = root
+        z = sum(math.exp(a / CHOICE_T) for a in top.values()) or 1.0
+        choice = {r: math.exp(a / CHOICE_T) / z for r, a in top.items()}
+        return [{"name": n, "conf": choice[group[n]] * retrieval_probability(a, RETRIEVAL_TAU, RETRIEVAL_S)}
+                for n, a in places]
+
     def recall_traces(self, text):
         """エピソード記憶の痕跡を、指示との意味の近さで呼び起こす
 
@@ -529,8 +655,8 @@ class Brain:
                  and a >= max(RETRIEVAL_TAU, level * INNER_PLACE_RATIO)]
         if inner:
             best, level = inner[0]
-        # 検索確率(ACT-R): 活性が検索閾値を超えるほど、確かに思い出せる
-        conf = 1 / (1 + math.exp(-(level - RETRIEVAL_TAU) / RETRIEVAL_S))
+        # 確信度 = 思い出せる確率 × ほかの場所との競合で選ばれる確率(ACT-R)。2位と僅差なら下がる
+        conf = next(p["conf"] for p in self.rank_places(act) if p["name"] == best)
 
         # 断片どうしのつながり(皮質のリンク + 海馬の記録)
         linked = {n: set() for n in active}
