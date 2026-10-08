@@ -9,6 +9,7 @@
              それぞれに意味のベクトルを持たせ、依頼と関係する部分を探せるようにする
 """
 import json
+import math
 import os
 import re
 import sqlite3
@@ -124,6 +125,50 @@ class Store:
         matrix = self.embedder.matrix[[self.embedder.index[doc_key(r[3])] for r in rows]] if rows else None
         self._index = (owner, matrix, keys, rows)
 
+    def ensure_keyword_index(self):
+        """キーワード検索の索引(SQLite の全文検索 FTS5、trigram 方式)を、チャンクに合わせて作る"""
+        self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', "
+                        "content_rowid='id', tokenize='trigram')")
+        n_fts = self.db.execute("SELECT count(*) FROM chunks_fts").fetchone()[0]
+        n = self.db.execute("SELECT count(*) FROM chunks").fetchone()[0]
+        if n_fts != n:
+            self.db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+            self.db.commit()
+        self._chunk_count = n
+
+    def keyword_search(self, terms, allowed):
+        """語が文字どおり含まれるチャンクを探す(型番・ファイル名・エラーメッセージのような、意味より字面が大事な手がかり用)
+
+        3文字以上の語は全文検索の索引で、2文字の語(「受注」「波形」など)は部分一致で探す。
+        多くのチャンクに出てくる語ほど重みを下げる(IDF)。
+        戻り値: {記録の鍵: そのやり取りのチャンクの中で一番高い点(語の重みの合計)}
+        """
+        if not terms or not allowed:
+            return {}
+        if not hasattr(self, "_chunk_count"):
+            self.ensure_keyword_index()
+        n = max(1, self._chunk_count)
+        hits = {}   # チャンクの id -> (記録の鍵, 点)
+        for term in dict.fromkeys(terms):
+            if len(term) >= 3:
+                rows = self.db.execute("SELECT c.id, c.key FROM chunks_fts f JOIN chunks c ON c.id = f.rowid "
+                                       "WHERE chunks_fts MATCH ? LIMIT ?", ('"' + term.replace('"', '""') + '"',
+                                                                             KEYWORD_MAX_HITS)).fetchall()
+            else:
+                rows = self.db.execute("SELECT id, key FROM chunks WHERE text LIKE ? LIMIT ?",
+                                       (f"%{term}%", KEYWORD_MAX_HITS)).fetchall()
+            if not rows or len(rows) >= KEYWORD_MAX_HITS:   # どこにでも出てくる語は手がかりにならない
+                continue
+            idf = math.log(n / len(rows))
+            for cid, key in rows:
+                if key in allowed:
+                    k, sc = hits.get(cid, (key, 0.0))
+                    hits[cid] = (k, sc + idf)
+        best = {}
+        for key, sc in hits.values():
+            best[key] = max(best.get(key, 0.0), sc)
+        return best
+
     def search(self, text, allowed):
         """依頼と各チャンクの意味の近さ。allowed(記録の鍵の集合)に含まれる記録のチャンクだけを対象にする
 
@@ -150,6 +195,7 @@ class Store:
 
 
 CHUNK_CANDIDATES = 300   # 依頼と近いチャンクを、上位いくつまで見るか
+KEYWORD_MAX_HITS = 2000  # キーワード検索で、これ以上のチャンクに出てくる語は、ありふれていて手がかりにならない
 
 
 def build_record(t):

@@ -56,6 +56,8 @@ CHOICE_T = 0.03              # 場所の選択規則の温度(ACT-R の t)。小
 SHOW_CONF = 0.4              # この確かさ以上のものだけ差し込む(確かさ = 実際に関係している確率の目安)
 PLACE_SHOW_CONF = 0.2
 EPISODES_SHOWN = 5
+EP_W_KEYWORD = 0.5           # 出来事の記録に、依頼の語が文字どおり含まれるかの重み
+KEYWORD_TERMS = 12           # キーワード検索に使う、依頼の語の数
 EP_W_DETAIL = 1.0            # 出来事の記録の中に、依頼とよく合う部分があるかの重み
 CHUNK_SIM_MIN = 0.45         # 記録の部分(チャンク)と依頼の類似度がこれ以下なら、関係なしとみなす
 CHUNK_SIM_FULL = 0.70        # 類似度がこれ以上なら、十分に関係がある
@@ -109,7 +111,7 @@ SEM_ABS_FULL = 0.65          # 類似度がこれ以上なら、絶対値の面�
 # 仕組みを1つずつ外して、それぞれの効果を切り分けるためのスイッチ(評価で使う)
 ABLATIONS = {"sleep": "睡眠による固定化", "spread": "皮質の活性化拡散", "hippo": "海馬のパターン補完",
              "gist": "出来事の要旨の照合", "concept": "出来事の概念の活性", "recency": "新しさ",
-             "detail": "記録の細部の照合", "context": "ワーキングメモリ(文脈)"}
+             "detail": "記録の細部の照合", "context": "ワーキングメモリ(文脈)", "keyword": "キーワード検索"}
 ABLATE = set()
 
 PLACE_RE = re.compile(r"^([A-Za-z]:[\\/]|/|~[\\/])")
@@ -669,7 +671,11 @@ class Brain:
         """
         sim = getattr(self, "last_trace_sim", {})
         traces = [tr for tr in self.traces if exclude_session is None or tr.get("session") != exclude_session]
-        details = self.store.search(text, {tr["ref"] for tr in traces if tr.get("ref")}) if self.store else {}
+        refs = {tr["ref"] for tr in traces if tr.get("ref")}
+        details = self.store.search(text, refs) if self.store else {}
+        # キーワード: 依頼の語が、やり取りの記録に文字どおり含まれるか(型番・ファイル名・エラーのような手がかり)
+        keyword = self.store.keyword_search(self.query_terms(text), refs) if self.store and "keyword" not in ABLATE else {}
+        top_k = max(keyword.values(), default=0) or 1.0
         concept_score = [sum(act.get(c, 0) for c in tr["concepts"]) for tr in traces]
         top_c = max(concept_score, default=0) or 1.0
         ranked = []
@@ -681,7 +687,8 @@ class Brain:
             detail = max(0.0, (parts[0][0] - CHUNK_SIM_MIN) / (CHUNK_SIM_FULL - CHUNK_SIM_MIN)) if parts else 0.0
             on = lambda name: 0.0 if name in ABLATE else 1.0
             a = (on("gist") * EP_W_GIST * gist + on("concept") * EP_W_CONCEPT * cs / top_c
-                 + on("recency") * EP_W_BASE * base + on("detail") * EP_W_DETAIL * detail)
+                 + on("recency") * EP_W_BASE * base + on("detail") * EP_W_DETAIL * detail
+                 + EP_W_KEYWORD * keyword.get(tr.get("ref"), 0.0) / top_k)
             ranked.append((a, tr, parts))
         ranked.sort(key=lambda x: -x[0])
         out = []
@@ -695,6 +702,12 @@ class Brain:
                                    key=lambda c: -act[c])[:HINTS_SHOWN]
             out.append(view)
         return out
+
+    def query_terms(self, text):
+        """キーワード検索に使う語: 依頼の名詞、英数字の語(型番・ファイル名など)、名前が一致した概念"""
+        terms = content_words(text) + re.findall(r"[A-Za-z0-9_.\-]{3,}", text)
+        terms += [c for c, s in self.last_cues.items() if s >= STRONG_CUE and not is_place(c)]
+        return [t for t in dict.fromkeys(terms) if len(t) >= 2 and not DEICTIC.fullmatch(t)][:KEYWORD_TERMS]
 
     def episode_view(self, tr, conf):
         ref = tr.get("ref") or ""
