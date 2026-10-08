@@ -27,7 +27,7 @@ body { margin: 0; background: var(--bg); color: var(--ink);
 header { display: flex; align-items: baseline; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 header h1 { font-size: 18px; margin: 0; }
 header .clock { color: var(--muted); font-variant-numeric: tabular-nums; }
-main { display: grid; grid-template-columns: 380px 1fr; gap: 16px; padding: 16px 20px; }
+main { display: grid; grid-template-columns: 460px 1fr; gap: 16px; padding: 16px 20px; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
 .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
@@ -55,6 +55,18 @@ button.danger { color: #c0392b; }
 .bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
 .bars .bar { height: 6px; background: var(--accent); border-radius: 3px; }
 .bars .val { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+h3 { font-size: 12px; color: var(--muted); margin: 14px 0 6px; font-weight: 600; }
+.ep-item { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px; font-size: 13px; }
+.ep-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ep-head .conf { margin-left: auto; }
+.ep-q { margin-top: 4px; font-weight: 600; }
+.ep-a { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.pl { font-family: Consolas, monospace; font-size: 11px; color: var(--place); background: var(--place-soft); padding: 0 6px; border-radius: 4px; word-break: break-all; }
+.conf { display: inline-block; width: 50px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; vertical-align: middle; }
+.conf i { display: block; height: 100%; background: var(--accent); }
+.chip.place { background: var(--place-soft); color: var(--place); font-family: Consolas, monospace; }
+.chip.cue { background: var(--line); color: var(--ink); }
+pre.inject { white-space: pre-wrap; font-size: 11px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 260px; overflow: auto; margin: 0; }
 .btns { display: flex; flex-wrap: wrap; gap: 6px; }
 #log { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 0; }
 #graphwrap { position: relative; }
@@ -96,9 +108,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; font-we
 <main>
   <div class="col">
     <section>
-      <h2>思い出す</h2>
+      <h2>依頼から関連することを思い出す</h2>
       <form class="row" id="recallForm">
-        <input type="text" id="recallText" placeholder="例: アプリのここを直して" autocomplete="off">
+        <input type="text" id="recallText" placeholder="例: 受注番号を6桁にそろえて" autocomplete="off">
         <button class="primary">思い出す</button>
       </form>
       <div id="result"></div>
@@ -191,26 +203,27 @@ function renderClock() {
 function renderResult() {
   const r = lastRecall;
   if (!r) { $("#result").innerHTML = ""; return; }
-  const a = r.answer;
+  const conf = c => `<span class="conf" title="確かさ(実際に関係している確率の目安)"><i style="width:${Math.round(c * 100)}%"></i></span><span class="hint">${c.toFixed(2)}</span>`;
+  const ep = e => `<div class="ep-item">
+      <div class="ep-head"><span class="hint">${esc(e.when)}</span> ${e.places.map(p => `<span class="pl">${esc(p)}</span>`).join(" ")}
+        ${e.conf != null ? conf(e.conf) : ""}</div>
+      <div class="ep-q">${esc(e.prompt)}</div>
+      ${e.reply ? `<div class="ep-a">${esc(e.reply)}</div>` : ""}</div>`;
   let html = "";
-  if (a.place) {
-    html += `<div class="answer"><div class="what">${a.about.length ? esc(a.about[0]) + " の場所は" : "場所は"}</div>
-      <div class="path">${esc(a.place)}</div>
-      <div class="what" style="margin-top:6px">確信度 ${a.confidence.toFixed(2)}</div>
-      <div class="meter"><i style="width:${Math.round(a.confidence * 100)}%"></i></div></div>`;
-    if (a.ambiguous.length) html += `<div class="warn">${a.ambiguous.map(esc).join(", ")} とも迷っています</div>`;
-    if (a.uncertain) html += `<div class="warn">うろ覚えです(確信度が低い)</div>`;
-  } else {
-    html += `<div class="answer none">場所は思い出せませんでした</div>`;
-  }
+  if (r.episodes.length) html += `<h3>関係しそうな過去のやり取り</h3>` + r.episodes.map(ep).join("");
+  if (r.places.length) html += `<h3>関係しそうな場所</h3><div class="chips">` +
+    r.places.map(p => `<span class="chip place">${esc(p.name)} ${p.conf.toFixed(2)}</span>`).join("") + `</div>`;
+  if (r.concepts.length) html += `<h3>関連する語・ファイル</h3><div class="chips">` +
+    r.concepts.map(c => `<span class="chip">${esc(c.name)}</span>`).join("") + `</div>`;
+  if (r.recent.length) html += `<h3>直前の作業(新しい会話の最初なので)</h3>` + r.recent.map(ep).join("");
+  if (!html) html = `<div class="answer none">関係しそうなことは思い出せませんでした</div>`;
   const cs = r.cue_strength || {};
-  html += `<div class="chips">${r.cues.length ? r.cues.map(c => `<span class="chip" title="${cs[c] >= 1 ? "名前が一致" : "意味が近い"}">${esc(c)} ${(cs[c] ?? 1).toFixed(2)}</span>`).join("") : '<span class="hint">指示に関係する概念が見つかりません</span>'}</div>`;
+  html += `<h3>手がかりにした語</h3><div class="chips">${r.cues.length ? r.cues.map(c => `<span class="chip cue" title="${cs[c] >= 1 ? "名前が一致" : "意味が近い"}">${esc(c)} ${(cs[c] ?? 1).toFixed(2)}</span>`).join("") : '<span class="hint">なし</span>'}</div>`;
   if (!r.embedding) html += `<p class="hint">埋め込みモデルに接続できないため、名前の一致だけで探しています</p>`;
-  if (r.fragments.length) {
-    html += `<div class="bars">` + r.fragments.slice(0, 8).map(([n, v]) =>
-      `<span class="name" title="${esc(n)}">${esc(n)}</span><span><span class="bar" style="display:block;width:${Math.max(2, v * 100)}%"></span></span><span class="val">${v.toFixed(2)}</span>`).join("") + `</div>`;
-  }
+  if (r.text) html += `<h3>依頼に差し込む文章 <button class="small" id="copyText">コピー</button></h3><pre class="inject">${esc(r.text)}</pre>`;
   $("#result").innerHTML = html;
+  const copy = $("#copyText");
+  if (copy) copy.onclick = () => navigator.clipboard.writeText(r.text).then(() => { copy.textContent = "コピーしました"; });
 }
 
 function renderHippo() {
@@ -274,7 +287,7 @@ function renderOverlay() {
     L.polyline([ll(at.get(a).world), ll(at.get(b).world)],
       {color: accent, weight: 1 + w * 4, opacity: .75, interactive: false}).addTo(overlay);
   }
-  const answer = lastRecall.answer.place;
+  const answer = lastRecall.answer && lastRecall.answer.place;
   const ranked = [...ov.nodes].sort((x, y) => y.act - x.act);
   const labelled = new Set([...ranked.slice(0, 12).map(n => n.id), ...ov.nodes.filter(n => n.cue).map(n => n.id), answer]);
   for (const n of ranked.reverse()) {
