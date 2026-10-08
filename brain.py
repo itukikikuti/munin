@@ -40,8 +40,8 @@ GIST_TEMP = 0.03             # 意味の近さの差を、呼び起こしの強�
 GIST_DECAY = 0.2             # 古い痕跡ほど呼び起こされにくくする度合い(経過時間^-d)
 GIST_Z_MIN = 1.5             # 一番近い痕跡が、他より何σ高ければ呼び起こし始めるか
 GIST_Z_FULL = 3.5
-GIST_ABS_MIN = 0.4           # 一番近い痕跡の類似度がこれ以下なら、呼び起こさない
-GIST_ABS_FULL = 0.6
+GIST_ABS_MIN = 0.70          # 痕跡との類似度がこれ以下なら、呼び起こさない(無関係な依頼でも 0.7 程度にはなる)
+GIST_ABS_FULL = 0.85         # 類似度がこれ以上なら、十分に近い
 # 関連することを思い出す(出来事の活性 A = 要旨 + 概念 + 新しさ、確かさは ACT-R の検索確率)
 EP_W_GIST = 1.0              # 要旨の意味の近さの重み
 EP_W_CONCEPT = 0.6           # 出来事に含まれる概念の活性の重み
@@ -494,7 +494,8 @@ class Brain:
             # 直前と同じ: 新しい会話の最初は、直前に何をしていたかを思い出しておく
             recent = [self.episode_view(tr, None) for tr in sorted(self.traces, key=lambda tr: -tr["t"])[:RECENT_SHOWN]]
 
-        result = {"episodes": [e for e in episodes if e["conf"] >= SHOW_CONF][:EPISODES_SHOWN],
+        result = {"ranked": episodes[:EPISODES_SHOWN * 2],
+                  "episodes": [e for e in episodes if e["conf"] >= SHOW_CONF][:EPISODES_SHOWN],
                   "concepts": [c for c in concepts if c["conf"] >= SHOW_CONF],
                   "places": [p for p in places if p["conf"] >= PLACE_SHOW_CONF][:PLACES_SHOWN],
                   "recent": recent, "cues": cues, "answer": answer}
@@ -505,7 +506,7 @@ class Brain:
             for e in result["episodes"]:  # 思い出した出来事は、次も思い出しやすくなる
                 tr = e["trace"]
                 tr["uses"] = (tr.get("uses", []) + [self.now])[-EXACT_USES:]
-        for e in result["episodes"] + result["recent"]:
+        for e in result["ranked"] + result["episodes"] + result["recent"]:
             e.pop("trace", None)
         return result
 
@@ -516,17 +517,23 @@ class Brain:
           概念   : 出来事に含まれる概念が、今どれだけ活性化しているか(語のつながり・文脈を経由)
           新しさ : 基本活性化 ln(Σ 経過時間^-d)。最近の出来事、最近思い出した出来事ほど高い
         """
-        z = getattr(self, "last_trace_z", {})
+        sim = getattr(self, "last_trace_sim", {})
         concept_score = [sum(act.get(c, 0) for c in tr["concepts"]) for tr in self.traces]
         top_c = max(concept_score, default=0) or 1.0
         ranked = []
         for tr, cs in zip(self.traces, concept_score):
-            gist = min(1.5, max(0.0, z.get(id(tr), 0.0) / GIST_Z_FULL))
+            # 依頼との類似度そのもので判断する(無関係な依頼でも、どれかは「他より際立って」近くなるため)
+            gist = max(0.0, (sim.get(id(tr), 0.0) - GIST_ABS_MIN) / (GIST_ABS_FULL - GIST_ABS_MIN))
             base = math.log(sum((self.now - u + 1) ** -EP_DECAY for u in [tr["t"]] + tr.get("uses", [])))
             a = EP_W_GIST * gist + EP_W_CONCEPT * cs / top_c + EP_W_BASE * base
             ranked.append((a, tr))
         ranked.sort(key=lambda x: -x[0])
-        return [self.episode_view(tr, retrieval_probability(a, EP_TAU, EP_S)) for a, tr in ranked[:EPISODES_SHOWN * 4]]
+        out = []
+        for a, tr in ranked[:EPISODES_SHOWN * 4]:
+            view = self.episode_view(tr, retrieval_probability(a, EP_TAU, EP_S))
+            view["activation"] = a
+            out.append(view)
+        return out
 
     def episode_view(self, tr, conf):
         return {"trace": tr, "conf": conf, "when": (tr.get("time") or "")[:16].replace("T", " "),
@@ -560,6 +567,7 @@ class Brain:
         戻り値: ({概念: 呼び起こされた強さ(合計1)}, 呼び起こしの確かさ 0〜1)
         """
         self.last_trace_z = {}
+        self.last_trace_sim = {}
         traces = [tr for tr in self.traces if tr["gist"] in self.embedder.index] if self.embedder else []
         if not traces:
             return {}, 0.0
@@ -568,6 +576,7 @@ class Brain:
             return {}, 0.0
         zs = (sims - sims.mean()) / (float(sims.std()) or 1.0)
         self.last_trace_z = {id(tr): float(z) for tr, z in zip(traces, zs)}
+        self.last_trace_sim = {id(tr): float(x) for tr, x in zip(traces, sims)}
         order = sims.argsort()[::-1]
         best = float(sims[order[0]])
         z = (best - float(sims.mean())) / (float(sims.std()) or 1.0)
