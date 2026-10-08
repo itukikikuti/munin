@@ -53,6 +53,11 @@ CHOICE_T = 0.03              # 場所の選択規則の温度(ACT-R の t)。小
 SHOW_CONF = 0.4              # この確かさ以上のものだけ差し込む(確かさ = 実際に関係している確率の目安)
 PLACE_SHOW_CONF = 0.2
 EPISODES_SHOWN = 5
+EP_W_DETAIL = 1.0            # 出来事の記録の中に、依頼とよく合う部分があるかの重み
+CHUNK_SIM_MIN = 0.45         # 記録の部分(チャンク)と依頼の類似度がこれ以下なら、関係なしとみなす
+CHUNK_SIM_FULL = 0.70        # 類似度がこれ以上なら、十分に関係がある
+DETAILS_SHOWN = 3            # 思い出した出来事ごとに、差し込む部分の数
+DETAIL_CHARS = 300           # 差し込む部分1つの長さ
 CONCEPTS_SHOWN = 15
 PLACES_SHOWN = 3
 RECENT_SHOWN = 3
@@ -156,10 +161,13 @@ def recollection_text(r):
     if r["episodes"]:
         lines.append("関係しそうな過去のやり取り(確かさ順):")
         for e in r["episodes"]:
-            line = f"- {e['when']} {' '.join(e['places'])} 依頼「{e['prompt']}」"
-            if e["reply"]:
-                line += f" → 回答「{e['reply']}」"
-            lines.append(line + f" (確かさ {e['conf']:.2f})")
+            lines.append(f"- {e['when']} {' '.join(e['places'])} 依頼「{e['prompt']}」(確かさ {e['conf']:.2f})")
+            if e["details"]:  # そのやり取りの中で、今の依頼と関係する部分
+                for d in e["details"]:
+                    text = " ".join(d["text"].split())
+                    lines.append(f"  - {d['kind']}: {text[:DETAIL_CHARS]}{'…' if len(text) > DETAIL_CHARS else ''}")
+            elif e["reply"]:
+                lines.append(f"  - 回答: {e['reply']}")
     if r["places"]:
         lines.append("関係しそうな場所: " + ", ".join(f"{p['name']} ({p['conf']:.2f})" for p in r["places"]))
     if r["concepts"]:
@@ -180,14 +188,19 @@ def link_key(a, b):
 
 
 class Brain:
-    def __init__(self, path, embedder="auto"):
+    def __init__(self, path, embedder="auto", store="auto"):
+        """store: やり取りの記録(全文)の保存先。痕跡はその記録への索引を持つ"""
         self.path = path
+        here = os.path.dirname(os.path.abspath(path))
         if embedder == "auto":
             embedder = None
             if os.environ.get("BRAIN_EMBED", "1") != "0":
-                cache = os.path.join(os.path.dirname(os.path.abspath(path)), "embeddings.json")
-                embedder = Embedder(cache)
+                embedder = Embedder(os.path.join(here, "embeddings.json"))
         self.embedder = embedder
+        if store == "auto":
+            from store import Store
+            store = Store(os.path.join(here, "records.sqlite")) if embedder else None
+        self.store = store
         self.last_cues = {}
         self.now = 0.0
         # link_key -> {"w": 保存強度, "recent": [直近の使用時刻], "n": 使用回数, "first": 最初の使用時刻}
@@ -485,7 +498,7 @@ class Brain:
         act = self.last_activation
         cue_set = set(cues)
 
-        episodes = self.rank_episodes(act, exclude_session=session)
+        episodes = self.rank_episodes(act, text, exclude_session=session)
         concepts = [{"name": n, "conf": retrieval_probability(a, RETRIEVAL_TAU, RETRIEVAL_S)}
                     for n, a in sorted(act.items(), key=lambda x: -x[1])
                     if not is_place(n) and n not in cue_set and a >= RECALL_THRESHOLD][:CONCEPTS_SHOWN]
@@ -512,15 +525,17 @@ class Brain:
             e.pop("trace", None)
         return result
 
-    def rank_episodes(self, act, exclude_session=None):
+    def rank_episodes(self, act, text, exclude_session=None):
         """出来事(エピソード記憶の痕跡)を、ACT-R の活性 A = 基本活性化 + 拡散活性化 で並べる
 
           要旨   : 依頼と出来事の要旨の意味の近さ(他の出来事と比べてどれだけ際立つか)
           概念   : 出来事に含まれる概念が、今どれだけ活性化しているか(語のつながり・文脈を経由)
           新しさ : 基本活性化 ln(Σ 経過時間^-d)。最近の出来事、最近思い出した出来事ほど高い
+          細部   : 出来事の記録(返答の段落・コマンドなど)の中に、依頼とよく合う部分があるか
         """
         sim = getattr(self, "last_trace_sim", {})
         traces = [tr for tr in self.traces if exclude_session is None or tr.get("session") != exclude_session]
+        details = self.store.search(text, {tr["ref"] for tr in traces if tr.get("ref")}) if self.store else {}
         concept_score = [sum(act.get(c, 0) for c in tr["concepts"]) for tr in traces]
         top_c = max(concept_score, default=0) or 1.0
         ranked = []
@@ -528,18 +543,22 @@ class Brain:
             # 依頼との類似度そのもので判断する(無関係な依頼でも、どれかは「他より際立って」近くなるため)
             gist = max(0.0, (sim.get(id(tr), 0.0) - GIST_ABS_MIN) / (GIST_ABS_FULL - GIST_ABS_MIN))
             base = math.log(sum((self.now - u + 1) ** -EP_DECAY for u in [tr["t"]] + tr.get("uses", [])))
-            a = EP_W_GIST * gist + EP_W_CONCEPT * cs / top_c + EP_W_BASE * base
-            ranked.append((a, tr))
+            parts = [d for d in details.get(tr.get("ref"), []) if d[0] >= CHUNK_SIM_MIN]
+            detail = max(0.0, (parts[0][0] - CHUNK_SIM_MIN) / (CHUNK_SIM_FULL - CHUNK_SIM_MIN)) if parts else 0.0
+            a = EP_W_GIST * gist + EP_W_CONCEPT * cs / top_c + EP_W_BASE * base + EP_W_DETAIL * detail
+            ranked.append((a, tr, parts))
         ranked.sort(key=lambda x: -x[0])
         out = []
-        for a, tr in ranked[:EPISODES_SHOWN * 4]:
+        for a, tr, parts in ranked[:EPISODES_SHOWN * 4]:
             view = self.episode_view(tr, retrieval_probability(a, EP_TAU, EP_S))
             view["activation"] = a
+            # 依頼と関係する部分(依頼文そのものは見出しに出すので除く)
+            view["details"] = [{"kind": k, "text": t, "sim": s} for s, k, t in parts if k != "依頼"][:DETAILS_SHOWN]
             out.append(view)
         return out
 
     def episode_view(self, tr, conf):
-        return {"trace": tr, "conf": conf, "when": (tr.get("time") or "")[:16].replace("T", " "),
+        return {"trace": tr, "conf": conf, "when": (tr.get("time") or "")[:16].replace("T", " "), "details": [],
                 "prompt": tr.get("prompt", " / ".join(tr["concepts"])), "reply": tr.get("reply", ""),
                 "places": [c for c in tr["concepts"] if is_place(c)][:2], "concepts": tr["concepts"]}
 

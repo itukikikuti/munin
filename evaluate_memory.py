@@ -32,7 +32,8 @@ import numpy as np
 
 from brain import EP_S, EP_TAU, EPISODES_SHOWN, Brain
 from embed import Embedder
-from import_sessions import Life, load_turns
+from import_sessions import Life, load_turns, store_records
+from store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "eval")
@@ -91,7 +92,9 @@ def main():
     state = os.path.join(OUT, "state_memory.json")
     if os.path.exists(state):
         os.remove(state)
-    brain = Brain(state, embedder=embedder)
+    store = Store(os.path.join(HERE, "records.sqlite"))   # やり取りの記録は事実なので、本番と共有する
+    store_records(store, turns)
+    brain = Brain(state, embedder=embedder, store=store)
     life = Life(brain, turns[0])
     for i, t in enumerate(train):
         if i % 50 == 0:
@@ -131,6 +134,8 @@ def main():
             "episodes": [{"activation": e["activation"], "relevant": relevant(e["concepts"], set(actual))}
                          for e in r["ranked"]],
             "text_len": len(r["text"]),
+            # 差し込む文章の中に、実際に使われた情報がそのまま出てくる割合
+            "text_recall": sum(c.lower() in r["text"].lower() for c in truth) / len(truth) if truth else None,
         })
         life.remember(t, concepts=actual)
     print(file=sys.stderr)
@@ -163,9 +168,11 @@ def make_report(results, train, test, seconds):
         lines.append(f"| {m} | {mean(scored, m, 0):.1%} | {mean(scored, m, 1):.1%} | "
                      f"{mean(first, m, 0):.1%}({len(first)}件) | {mean(later, m, 0):.1%}({len(later)}件) |")
     shown_rec = sum(x["shown_recall"] for x in scored) / max(len(scored), 1)
+    text_rec = sum(x["text_recall"] for x in scored) / max(len(scored), 1)
     avg_len = sum(x["text_len"] for x in results) / max(len(results), 1)
     lines += ["", f"記憶モデルが実際に差し込む内容(確かさで絞ったやり取り+語・場所+直前の作業)の再現率は "
-              f"{shown_rec:.1%}、差し込む文章の長さは平均 {avg_len:.0f}文字。", ""]
+              f"{shown_rec:.1%}。差し込む文章の中に、実際に使われた情報がそのまま書かれている割合は {text_rec:.1%}。"
+              f"差し込む文章の長さは平均 {avg_len:.0f}文字。", ""]
 
     # 確信度: 前半で ACT-R の検索確率の τ と s を推定し、後半で確かめる
     half = len(results) // 2

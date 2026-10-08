@@ -314,7 +314,7 @@ class Life:
         concepts = self.episode(t) if concepts is None else concepts
         if len(concepts) >= 2:
             note = {"prompt": excerpt(t["user"], PROMPT_EXCERPT), "reply": excerpt(t["reply"][-1] if t["reply"] else "", REPLY_EXCERPT),
-                    "time": parse_time(t).isoformat(), "session": os.path.basename(t["session"])}
+                    "time": parse_time(t).isoformat(), "session": os.path.basename(t["session"]), "ref": record_key(t)}
             self.brain.learn(concepts, gist=t["user"], note=note)  # 要旨は依頼文(その出来事が何についてだったか)
             self.learned += 1
 
@@ -329,6 +329,19 @@ def excerpt(text, limit):
     text = re.sub(r"[*#|`>~_]+", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def record_key(t):
+    """やり取りの記録の鍵(発言のID。なければ会話と時刻)"""
+    return t.get("uuid") or f"{os.path.basename(t['session'])}:{t['t']}"
+
+
+def store_records(store, turns):
+    """やり取りの記録(全文)を保存し、細かい単位の検索に使うベクトルを計算しておく"""
+    for t in turns:
+        store.put(record_key(t), build_record(t))
+    store.commit()
+    return store.ensure_vectors(progress=True)
 
 
 def parse_time(t):
@@ -357,6 +370,8 @@ def main():
     brain = Brain(STATE)
     if brain.embedder:  # 出来事の要旨のベクトルを、先にまとめて計算しておく
         brain.embedder.ensure_gists([t["user"] for t in turns], progress=True)
+    if brain.store:     # やり取りの記録(全文)と、細かい単位の検索用のベクトル
+        store_records(brain.store, turns)
     life = Life(brain, turns[0])
     for i, t in enumerate(turns):
         if i % 50 == 0:
