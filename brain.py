@@ -14,6 +14,7 @@ import math
 import os
 import re
 import sys
+import time
 from itertools import combinations
 
 from embed import Embedder
@@ -60,6 +61,9 @@ DETAILS_SHOWN = 3            # 思い出した出来事ごとに、差し込む�
 PROMPT_HINT_CHARS = 60       # 差し込む文章に載せる、依頼の長さ
 DETAIL_HINT_CHARS = 120      # 差し込む文章に載せる、関係する部分の長さ
 HINTS_SHOWN = 6              # 思い出した出来事ごとに載せる、手がかりの語の数
+STALE_PLACE = 0.2            # 今はもうない場所の活性を何倍にするか
+SHOWN_PER_SESSION = 200      # 会話ごとに覚えておく、差し込んだ記憶の鍵の数
+SHOWN_SESSIONS = 50          # 差し込んだ記憶の鍵を覚えておく会話の数(古い会話の分は忘れる)
 SHORT_ID = 8                 # 記録の鍵の、差し込む文章に載せる長さ(先頭から)
 CONCEPTS_SHOWN = 15
 PLACES_SHOWN = 3
@@ -188,7 +192,8 @@ def recollection_text(r):
             if hints:
                 lines.append("  " + " / ".join(hints))
     if r["places"]:
-        lines.append("関係しそうな場所: " + ", ".join(p["name"] for p in r["places"]))
+        lines.append("関係しそうな場所: " + ", ".join(p["name"] + ("(今はない)" if p.get("stale") else "")
+                                                   for p in r["places"]))
     if r["concepts"]:
         lines.append("関連する語・ファイル: " + ", ".join(c["name"] for c in r["concepts"]))
     if not lines:
@@ -227,6 +232,9 @@ class Brain:
             store = Store(os.path.join(here, "records.sqlite")) if embedder else None
         self.store = store
         self.last_cues = {}
+        self.check_places = True   # 思い出した場所が今もあるか確かめる(評価では、過去の時点で思い出すので確かめない)
+        self._place_cache = {}
+        self.shown = {}            # 会話ごとに、すでに差し込んだ記憶の鍵(同じ会話で同じ記憶を繰り返し差し込まない)
         self.now = 0.0
         # link_key -> {"w": 保存強度, "recent": [直近の使用時刻], "n": 使用回数, "first": 最初の使用時刻}
         self.cortex = {}
@@ -251,13 +259,15 @@ class Brain:
             self.hippocampus = s["hippocampus"]
             self.traces = s.get("traces", [])
             self.seq = s.get("seq", 0)
+            self.shown = s.get("shown", {})
             self.context = {c: v if isinstance(v, list) else [v, 0]
                             for c, v in s["context"].items()}
 
     def save(self):
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"now": self.now, "seq": self.seq, "cortex": self.cortex,
-                       "hippocampus": self.hippocampus, "traces": self.traces, "context": self.context},
+                       "hippocampus": self.hippocampus, "traces": self.traces, "context": self.context,
+                       "shown": self.shown},
                       f, ensure_ascii=False, separators=(",", ":"))
         if self.embedder:
             self.embedder.save()
@@ -539,8 +549,13 @@ class Brain:
             others = [tr for tr in self.traces if session is None or tr.get("session") != session]
             recent = [self.episode_view(tr, None) for tr in sorted(others, key=lambda tr: -tr["t"])[:RECENT_SHOWN]]
 
+        shown = [e for e in episodes if e["conf"] >= SHOW_CONF]
+        if session and reinforce:
+            # 同じ会話ですでに差し込んだ記憶は、相手(Claude)がもう知っているので繰り返さない
+            already = set(self.shown.get(session, []))
+            shown = [e for e in shown if e["ref"] not in already]
         result = {"ranked": episodes[:EPISODES_SHOWN * 2],
-                  "episodes": [e for e in episodes if e["conf"] >= SHOW_CONF][:EPISODES_SHOWN],
+                  "episodes": shown[:EPISODES_SHOWN],
                   "concepts": [c for c in concepts if c["conf"] >= SHOW_CONF],
                   "places": [p for p in places if p["conf"] >= PLACE_SHOW_CONF][:PLACES_SHOWN],
                   "recent": recent, "cues": cues, "answer": answer}
@@ -551,6 +566,11 @@ class Brain:
             for e in result["episodes"]:  # 思い出した出来事は、次も思い出しやすくなる
                 tr = e["trace"]
                 tr["uses"] = (tr.get("uses", []) + [self.now])[-EXACT_USES:]
+            if session:
+                refs = self.shown.pop(session, []) + [e["ref"] for e in result["episodes"] + result["recent"] if e["ref"]]
+                self.shown[session] = refs[-SHOWN_PER_SESSION:]
+                for old in list(self.shown)[:-SHOWN_SESSIONS]:  # 古い会話の分は忘れる
+                    del self.shown[old]
         for e in result["ranked"] + result["episodes"] + result["recent"]:
             e.pop("trace", None)
         return result
@@ -594,17 +614,30 @@ class Brain:
 
     def episode_view(self, tr, conf):
         ref = tr.get("ref") or ""
+        places = [c + ("(今はない)" if not self.place_exists(c) else "") for c in tr["concepts"] if is_place(c)][:2]
         return {"trace": tr, "conf": conf, "when": (tr.get("time") or "")[:16].replace("T", " "), "details": [],
                 "id": ref[:SHORT_ID], "ref": ref, "hints": [],
                 "prompt": tr.get("prompt", " / ".join(tr["concepts"])), "reply": tr.get("reply", ""),
-                "places": [c for c in tr["concepts"] if is_place(c)][:2], "concepts": tr["concepts"]}
+                "places": places, "concepts": tr["concepts"]}
+
+    def place_exists(self, place):
+        """その場所(フォルダ)が今もあるか。このPCのパスでなければ、あるとみなす。確かめた結果は1分間使い回す"""
+        if not self.check_places or not re.match(r"^[A-Za-z]:", place):
+            return True
+        hit = self._place_cache.get(place)
+        if hit is None or time.time() - hit[1] > 60:
+            hit = (os.path.isdir(place), time.time())
+            self._place_cache[place] = hit
+        return hit[0]
 
     def rank_places(self, act):
         """関連する場所の確かさ = 思い出せる確率 × ほかの場所との競合で選ばれる確率(ACT-R の選択規則)
 
         競合はプロジェクト単位で考える(あるフォルダと、その中のフォルダは競合しない)。
         """
-        places = sorted(((n, a) for n, a in act.items() if is_place(n) and a > 0), key=lambda x: -x[1])
+        # 今はもうない場所(移動・削除された)は、思い出しても役に立たないので弱める(干渉による忘却)
+        places = sorted(((n, a if self.place_exists(n) else a * STALE_PLACE) for n, a in act.items()
+                         if is_place(n) and a > 0), key=lambda x: -x[1])
         top = {}  # プロジェクト(他のどの場所の中でもない場所) -> 活性
         group = {}
         for n, a in places:
@@ -615,8 +648,8 @@ class Brain:
             group[n] = root
         z = sum(math.exp(a / CHOICE_T) for a in top.values()) or 1.0
         choice = {r: math.exp(a / CHOICE_T) / z for r, a in top.items()}
-        return [{"name": n, "conf": choice[group[n]] * retrieval_probability(a, RETRIEVAL_TAU, RETRIEVAL_S)}
-                for n, a in places]
+        return [{"name": n, "conf": choice[group[n]] * retrieval_probability(a, RETRIEVAL_TAU, RETRIEVAL_S),
+                 "stale": not self.place_exists(n)} for n, a in places]
 
     def recall_traces(self, text):
         """エピソード記憶の痕跡を、指示との意味の近さで呼び起こす

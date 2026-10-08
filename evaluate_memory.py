@@ -117,6 +117,7 @@ def main():
     store = Store(os.path.join(DATA, "records.sqlite"))   # やり取りの記録は事実なので、本番と共有する
     store_records(store, turns)
     brain = Brain(state, embedder=embedder, store=store)
+    brain.check_places = False   # 過去の時点で思い出すので、今の時点で場所があるかは確かめない(未来の情報が混ざる)
     life = Life(brain, turns[0])
     for i, t in enumerate(train):
         if i % 50 == 0:
