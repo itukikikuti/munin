@@ -68,6 +68,12 @@ h3 { font-size: 12px; color: var(--muted); margin: 14px 0 6px; font-weight: 600;
 .chip.place { background: var(--place-soft); color: var(--place); font-family: Consolas, monospace; }
 .chip.cue { background: var(--line); color: var(--ink); }
 pre.inject { white-space: pre-wrap; font-size: 11px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 260px; overflow: auto; margin: 0; }
+.rid { font-family: Consolas, monospace; font-size: 12px; color: var(--accent); text-decoration: none; }
+.rid:hover { text-decoration: underline; }
+dialog#recordDialog { width: min(900px, 92vw); max-height: 85vh; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 0; }
+dialog#recordDialog::backdrop { background: rgba(0, 0, 0, .35); }
+.dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); }
+#recordText { white-space: pre-wrap; font-size: 12px; margin: 0; padding: 12px 14px; }
 .btns { display: flex; flex-wrap: wrap; gap: 6px; }
 #log { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); max-height: 180px; overflow: auto; white-space: pre-wrap; margin: 0; }
 #graphwrap { position: relative; }
@@ -173,6 +179,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; font-we
   </div>
 </main>
 
+<dialog id="recordDialog">
+  <div class="dlg-head"><b id="recordTitle"></b><button class="small" onclick="this.closest('dialog').close()">閉じる</button></div>
+  <pre id="recordText"></pre>
+</dialog>
 <script>
 const $ = s => document.querySelector(s);
 const isPlace = n => /^([A-Za-z]:[\\/]|\/|~[\\/])/.test(n);
@@ -206,7 +216,8 @@ function renderResult() {
   if (!r) { $("#result").innerHTML = ""; return; }
   const conf = c => `<span class="conf" title="確かさ(実際に関係している確率の目安)"><i style="width:${Math.round(c * 100)}%"></i></span><span class="hint">${c.toFixed(2)}</span>`;
   const ep = e => `<div class="ep-item">
-      <div class="ep-head"><span class="hint">${esc(e.when)}</span> ${e.places.map(p => `<span class="pl">${esc(p)}</span>`).join(" ")}
+      <div class="ep-head">${e.id ? `<a href="#" class="rid" data-id="${esc(e.id)}" title="記録を開く">[${esc(e.id)}]</a>` : ""}
+        <span class="hint">${esc(e.when)}</span> ${e.places.map(p => `<span class="pl">${esc(p)}</span>`).join(" ")}
         ${e.conf != null ? conf(e.conf) : ""}</div>
       <div class="ep-q">${esc(e.prompt)}</div>
       ${e.details && e.details.length
@@ -225,6 +236,14 @@ function renderResult() {
   if (!r.embedding) html += `<p class="hint">埋め込みモデルに接続できないため、名前の一致だけで探しています</p>`;
   if (r.text) html += `<h3>依頼に差し込む文章 <button class="small" id="copyText">コピー</button></h3><pre class="inject">${esc(r.text)}</pre>`;
   $("#result").innerHTML = html;
+  document.querySelectorAll("#result .rid").forEach(a => a.onclick = async ev => {
+    ev.preventDefault();
+    const res = await fetch(`/api/record?id=${encodeURIComponent(a.dataset.id)}`);
+    const d = await res.json();
+    $("#recordText").textContent = d.text || d.error;
+    $("#recordTitle").textContent = `記録 [${a.dataset.id}]`;
+    $("#recordDialog").showModal();
+  });
   const copy = $("#copyText");
   if (copy) copy.onclick = () => navigator.clipboard.writeText(r.text).then(() => { copy.textContent = "コピーしました"; });
 }
