@@ -97,6 +97,11 @@ class Store:
     def commit(self):
         self.db.commit()
 
+    def find(self, short):
+        """鍵の先頭部分から記録の鍵を探す(1件に決まらなければ None)"""
+        rows = self.db.execute("SELECT key FROM records WHERE key LIKE ? LIMIT 2", (short + "%",)).fetchall()
+        return rows[0][0] if len(rows) == 1 else None
+
     def record(self, key):
         row = self.db.execute("SELECT data FROM records WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else None

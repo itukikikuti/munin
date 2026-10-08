@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from brain import Brain, is_place
+from memory_detail import render
 from tiles import GraphMap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -158,6 +159,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, g.tile(z, x, y, q.get("theme", "light")), "image/png", cache=True)
         elif url.path == "/api/graph":
             self.send(200, current_graph().meta())
+        elif url.path == "/api/record":
+            b = load()
+            key = b.store.find(q.get("id", "")) if b.store else None
+            record = b.store.record(key) if key else None
+            self.send(200 if record else 404, {"key": key, "text": render(record, full="full" in q)} if record
+                      else {"error": "記録が見つからない"})
         elif url.path == "/api/node_at":
             g = current_graph()
             self.send(200, {"node": g.node_at(float(q["x"]), float(q["y"]), int(q["z"]))})
