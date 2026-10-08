@@ -88,6 +88,12 @@ SEM_WITH_EXACT = 0.5         # 名前の一致があるときの、連想によ�
 SEM_ABS_MIN = 0.5            # 類似度がこれ以下なら、どれだけ際立っていても手がかりにしない
 SEM_ABS_FULL = 0.65          # 類似度がこれ以上なら、絶対値の面では十分に近い
 
+# 仕組みを1つずつ外して、それぞれの効果を切り分けるためのスイッチ(評価で使う)
+ABLATIONS = {"sleep": "睡眠による固定化", "spread": "皮質の活性化拡散", "hippo": "海馬のパターン補完",
+             "gist": "出来事の要旨の照合", "concept": "出来事の概念の活性", "recency": "新しさ",
+             "detail": "記録の細部の照合", "context": "ワーキングメモリ(文脈)"}
+ABLATE = set()
+
 PLACE_RE = re.compile(r"^([A-Za-z]:[\\/]|/|~[\\/])")
 
 
@@ -344,6 +350,11 @@ class Brain:
     # ---- 睡眠(固定化) ----
 
     def sleep(self, hours=SLEEP_HOURS):
+        if "sleep" in ABLATE:  # 睡眠を外す: 再生も固定化もせず、海馬の記録は薄れて消えるだけ
+            self.hippocampus = [ep for ep in self.hippocampus if self.hippo_strength(ep) >= HIPPO_FORGET_BELOW]
+            self.now += hours
+            self.context = {}
+            return []
         report = []
         touched = set()
         # 睡眠が短いと、再生できる回数も減る
@@ -465,7 +476,7 @@ class Brain:
         cue_budget = 1 - budget if referential else 1.0
 
         # 手がかりに向ける注意を、語による手がかりと、出来事の要旨による照合で分け合う
-        episodic, gate = self.recall_traces(text)
+        episodic, gate = self.recall_traces(text) if "gist" not in ABLATE else ({}, 0.0)
         gist_budget = cue_budget * GIST_SHARE * gate
         word_budget = cue_budget - gist_budget
         scale = word_budget / max(1.0, total) if total else 0.0
@@ -473,7 +484,7 @@ class Brain:
         reinstated = {c: gist_budget * a for c, a in episodic.items()}
         self.last_episodic = reinstated
         self.last_gate = gate
-        wm = self.working_memory() if use_context else {}
+        wm = self.working_memory() if use_context and "context" not in ABLATE else {}
         context = {c: budget * w / max(1.0, sum(wm.values())) for c, w in wm.items() if c not in attention}
 
         act_cue, hits = self.activate(attention, reinstated)
@@ -564,7 +575,9 @@ class Brain:
             base = math.log(sum((self.now - u + 1) ** -EP_DECAY for u in [tr["t"]] + tr.get("uses", [])))
             parts = [d for d in details.get(tr.get("ref"), []) if d[0] >= CHUNK_SIM_MIN]
             detail = max(0.0, (parts[0][0] - CHUNK_SIM_MIN) / (CHUNK_SIM_FULL - CHUNK_SIM_MIN)) if parts else 0.0
-            a = EP_W_GIST * gist + EP_W_CONCEPT * cs / top_c + EP_W_BASE * base + EP_W_DETAIL * detail
+            on = lambda name: 0.0 if name in ABLATE else 1.0
+            a = (on("gist") * EP_W_GIST * gist + on("concept") * EP_W_CONCEPT * cs / top_c
+                 + on("recency") * EP_W_BASE * base + on("detail") * EP_W_DETAIL * detail)
             ranked.append((a, tr, parts))
         ranked.sort(key=lambda x: -x[0])
         out = []
@@ -660,7 +673,7 @@ class Brain:
             sources[c] = sources.get(c, 0) + a
         hits = []
         reinstated = {}
-        for ep in self.hippocampus:
+        for ep in (self.hippocampus if "hippo" not in ABLATE else []):
             match = min(1.0, sum(senders[c] / count[c] for c in ep["concepts"]
                                  if c in senders))
             if match <= 0:
@@ -683,6 +696,8 @@ class Brain:
         adj, degree, total = self.associations()
         scale = math.log(max(2, len(adj)))  # ln(lift) の最大値の目安で 0〜1 にそろえる
         act = dict(sources)
+        if "spread" in ABLATE:
+            return act, hits
         for j, a in {**senders, **sources}.items():
             if degree.get(j, 0) <= 0:
                 continue

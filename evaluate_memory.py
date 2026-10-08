@@ -1,9 +1,14 @@
 """実際のセッション記録で、関連することを思い出せるかを測る(LLM は使わない)
 
-  python evaluate_memory.py              ※ 学習 900件 → 評価 300件
-  python evaluate_memory.py 900 300
+  python evaluate_memory.py                      ※ 調整用の期間で評価する(普段はこれ)
+  python evaluate_memory.py --mode test          ※ 最終確認用の期間で評価する(調整が終わったときだけ)
+  python evaluate_memory.py --ablate sleep       ※ 仕組みを1つ外して評価する(どの仕組みが効いているかを切り分ける)
+  python evaluate_memory.py --train 900          ※ 学習に使うやり取りを、評価期間の直前の900件に絞る(速く試したいとき)
 
-過去のやり取り(学習分)で記憶を作ったあと、その後のやり取り(評価分)を時刻順に1件ずつ、
+期間の分け方: 最新の TEST_N 件は最終確認用に取り置き、調整のあいだは使わない。その手前の VALID_N 件を調整用にする。
+パラメータを調整用の期間に合わせ込んでも、最終確認用の期間で本当の実力を確かめられる。
+
+過去のやり取り(学習分)で記憶を作ったあと、評価分のやり取りを時刻順に1件ずつ、
 「依頼から関連することを思い出させる → 実際の出来事を覚えさせる」の順で体験させる。
 
 正解: そのやり取りで実際に使われた語・ファイル・場所(依頼と Claude の回答から取り出した概念)のうち、
@@ -11,7 +16,7 @@
       情報は除く(Claude が会話の中ですでに知っているので、差し込む価値がない)。
 どの方式も、今の会話のやり取りは思い出す対象から外す。
 比べる方式(どれも過去のやり取りを5件思い出す):
-  記憶モデル : 要旨・概念の活性・新しさを合わせた ACT-R の活性で選ぶ
+  記憶モデル : 要旨・概念の活性・新しさ・細部を合わせた ACT-R の活性で選ぶ
   RAG        : 依頼と要旨の意味の近さだけで選ぶ
   直近       : 最新のやり取り5件
   キーワード : 依頼文に出てくる概念を多く含むやり取り
@@ -20,8 +25,9 @@
   適合率 : 思い出したやり取りのうち、実際に関係していた(そのやり取りで使われた情報を2つ以上含む)割合
 確信度は、評価分の前半で ACT-R の検索確率の閾値と傾きを推定し、後半で当たり具合を確かめる。
 
-結果は eval/memory_report.md と eval/memory_results.jsonl に保存する。本番の記憶は変えない。
+結果は eval/memory_report_<期間>[_<外した仕組み>].md に保存する。本番の記憶は変えない。
 """
+import argparse
 import json
 import math
 import os
@@ -30,15 +36,19 @@ import time
 
 import numpy as np
 
+import brain as brain_module
 from brain import EP_S, EP_TAU, EPISODES_SHOWN, Brain
 from embed import Embedder
 from import_sessions import Life, load_turns, store_records
 from store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(HERE, "eval")
+DATA = os.environ.get("BRAIN_DATA", HERE)   # 埋め込みのキャッシュとやり取りの記録の置き場所(コードを別の場所にコピーして評価するとき用)
+OUT = os.path.join(DATA, "eval")
 K = EPISODES_SHOWN
 METHODS = ["記憶モデル", "RAG", "直近", "キーワード"]
+TEST_N = 300            # 最終確認用に取り置く、最新のやり取りの数
+VALID_N = 300           # 調整用の期間のやり取りの数
 CONF_BINS = [(0.0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.01)]
 
 
@@ -77,22 +87,34 @@ def fit_retrieval(acts, labels, steps=3000, lr=0.5):
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    n_train = int(sys.argv[1]) if len(sys.argv) > 1 else 900
-    n_test = int(sys.argv[2]) if len(sys.argv) > 2 else 300
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["valid", "test"], default="valid")
+    ap.add_argument("--train", type=int, default=None, help="学習に使う、評価期間の直前のやり取りの数")
+    ap.add_argument("--ablate", default="", help="外す仕組み(カンマ区切り): " + ", ".join(brain_module.ABLATIONS))
+    args = ap.parse_args()
+    brain_module.ABLATE = {a for a in args.ablate.split(",") if a}
+    unknown = brain_module.ABLATE - set(brain_module.ABLATIONS)
+    if unknown:
+        raise SystemExit(f"知らない仕組み: {', '.join(unknown)}")
     os.makedirs(OUT, exist_ok=True)
     t0 = time.time()
 
-    turns = load_turns(n_train + n_test)
-    train, test = turns[:-n_test], turns[-n_test:]
+    turns = load_turns()
+    if args.mode == "valid":
+        turns = turns[:-TEST_N]          # 最終確認用の期間は見ない
+    train, test = turns[:-VALID_N if args.mode == "valid" else -TEST_N], turns[-VALID_N if args.mode == "valid" else -TEST_N:]
+    if args.train:
+        train = train[-args.train:]
+        turns = train + test
     print(f"学習 {len(train)}件 ({train[0]['t'][:10]}〜{train[-1]['t'][:10]}) / "
           f"評価 {len(test)}件 ({test[0]['t'][:10]}〜{test[-1]['t'][:10]})")
-    embedder = Embedder(os.path.join(HERE, "embeddings.json"))
+    embedder = Embedder(os.path.join(DATA, "embeddings.json"))
     embedder.ensure_gists([t["user"] for t in turns], progress=True)
 
     state = os.path.join(OUT, "state_memory.json")
     if os.path.exists(state):
         os.remove(state)
-    store = Store(os.path.join(HERE, "records.sqlite"))   # やり取りの記録は事実なので、本番と共有する
+    store = Store(os.path.join(DATA, "records.sqlite"))   # やり取りの記録は事実なので、本番と共有する
     store_records(store, turns)
     brain = Brain(state, embedder=embedder, store=store)
     life = Life(brain, turns[0])
@@ -143,18 +165,21 @@ def main():
     with open(os.path.join(OUT, "memory_results.jsonl"), "w", encoding="utf-8") as f:
         for x in results:
             f.write(json.dumps(x, ensure_ascii=False) + "\n")
-    report = make_report(results, train, test, time.time() - t0)
-    with open(os.path.join(OUT, "memory_report.md"), "w", encoding="utf-8") as f:
+    report = make_report(results, train, test, time.time() - t0, args)
+    name = f"memory_report_{args.mode}" + (f"_{'_'.join(sorted(brain_module.ABLATE))}" if brain_module.ABLATE else "")
+    with open(os.path.join(OUT, name + ".md"), "w", encoding="utf-8") as f:
         f.write(report)
     print(report)
 
 
-def make_report(results, train, test, seconds):
+def make_report(results, train, test, seconds, args):
     scored = [x for x in results if x["scores"]]
     first = [x for x in scored if x["first"]]
     later = [x for x in scored if not x["first"]]
     mean = lambda xs, m, k: sum(x["scores"][m][k] for x in xs) / max(len(xs), 1)
     lines = ["# 関連することを思い出せるかの自動評価", "",
+             f"- 期間: {'調整用' if args.mode == 'valid' else '最終確認用'}"
+             + (f" / 外した仕組み: {', '.join(sorted(brain_module.ABLATE))}" if brain_module.ABLATE else ""),
              f"- 学習: {len(train)}件({train[0]['t'][:10]}〜{train[-1]['t'][:10]})",
              f"- 評価: {len(test)}件({test[0]['t'][:10]}〜{test[-1]['t'][:10]})。"
              f"正解の情報(以前から記憶にあった、実際に使われた情報)があるもの {len(scored)}件",
