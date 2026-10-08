@@ -96,12 +96,12 @@ def _handle(path, body):
         text = body.get("text", "").strip()
         if not text:
             return 400, {"error": "指示を入力してください"}
-        cues, fragments, answer = b.recall(text)
-        result = {"recall": {"text": text, "cues": cues, "cue_strength": b.last_cues,
-                             "fragments": fragments[:30], "answer": answer,
+        r = b.recollect(text)
+        r.pop("ranked", None)
+        result = {"recall": {**r, "query": text, "cue_strength": b.last_cues,
                              "embedding": bool(b.embedder and b.embedder.available)}}
         if graph.version is not None:
-            result["recall"]["overlay"] = graph.overlay(b.last_activation, cues)
+            result["recall"]["overlay"] = graph.overlay(b.last_activation, r["cues"])
     elif path == "/api/sleep":
         log = []
         for i in range(max(1, min(60, int(body.get("nights", 1))))):

@@ -44,13 +44,13 @@ GIST_ABS_MIN = 0.70          # 痕跡との類似度がこれ以下なら、呼�
 GIST_ABS_FULL = 0.85         # 類似度がこれ以上なら、十分に近い
 # 関連することを思い出す(出来事の活性 A = 要旨 + 概念 + 新しさ、確かさは ACT-R の検索確率)
 EP_W_GIST = 1.0              # 要旨の意味の近さの重み
-EP_W_CONCEPT = 0.6           # 出来事に含まれる概念の活性の重み
-EP_W_BASE = 0.15             # 新しさ(基本活性化)の重み
+EP_W_CONCEPT = 1.0           # 出来事に含まれる概念の活性の重み
+EP_W_BASE = 0.05             # 新しさ(基本活性化)の重み
 EP_DECAY = 0.5               # 新しさの減り方(ACT-R の d)
-EP_TAU = 0.6                 # 出来事の検索閾値
-EP_S = 0.12                  # 出来事の検索確率の、閾値付近でのなだらかさ
+EP_TAU = 1.55                # 出来事の検索閾値(自動評価の当たり外れから推定。evaluate_memory.py)
+EP_S = 1.26                  # 出来事の検索確率の、閾値付近でのなだらかさ(同上)
 CHOICE_T = 0.03              # 場所の選択規則の温度(ACT-R の t)。小さいほど1位が選ばれやすい
-SHOW_CONF = 0.5              # この確かさ以上のものだけ差し込む
+SHOW_CONF = 0.4              # この確かさ以上のものだけ差し込む(確かさ = 実際に関係している確率の目安)
 PLACE_SHOW_CONF = 0.2
 EPISODES_SHOWN = 5
 CONCEPTS_SHOWN = 15
@@ -469,7 +469,7 @@ class Brain:
 
     # ---- 関連することを思い出す(依頼に差し込む記憶) ----
 
-    def recollect(self, text, use_context=True, reinforce=True):
+    def recollect(self, text, use_context=True, reinforce=True, session=None):
         """依頼に関連することを思い出す
 
         記憶力の良い人が、依頼を聞いて関連することを思い出すのと同じように、
@@ -478,13 +478,14 @@ class Brain:
           場所   : 関連するフォルダ
           直近   : 新しい会話の最初なら、直前に何をしていたか
         を思い出し、それぞれに確かさ(ACT-R の検索確率)を付ける。text は差し込み用の文章。
+        session: 今の会話の識別子。今の会話のやり取りは相手(Claude)がすでに覚えているので、思い出す対象から外す
         """
         new_conversation = not self.context
         cues, _, answer = self.recall(text, use_context, reinforce=False)
         act = self.last_activation
         cue_set = set(cues)
 
-        episodes = self.rank_episodes(act)
+        episodes = self.rank_episodes(act, exclude_session=session)
         concepts = [{"name": n, "conf": retrieval_probability(a, RETRIEVAL_TAU, RETRIEVAL_S)}
                     for n, a in sorted(act.items(), key=lambda x: -x[1])
                     if not is_place(n) and n not in cue_set and a >= RECALL_THRESHOLD][:CONCEPTS_SHOWN]
@@ -492,7 +493,8 @@ class Brain:
         recent = []
         if new_conversation:
             # 直前と同じ: 新しい会話の最初は、直前に何をしていたかを思い出しておく
-            recent = [self.episode_view(tr, None) for tr in sorted(self.traces, key=lambda tr: -tr["t"])[:RECENT_SHOWN]]
+            others = [tr for tr in self.traces if session is None or tr.get("session") != session]
+            recent = [self.episode_view(tr, None) for tr in sorted(others, key=lambda tr: -tr["t"])[:RECENT_SHOWN]]
 
         result = {"ranked": episodes[:EPISODES_SHOWN * 2],
                   "episodes": [e for e in episodes if e["conf"] >= SHOW_CONF][:EPISODES_SHOWN],
@@ -510,7 +512,7 @@ class Brain:
             e.pop("trace", None)
         return result
 
-    def rank_episodes(self, act):
+    def rank_episodes(self, act, exclude_session=None):
         """出来事(エピソード記憶の痕跡)を、ACT-R の活性 A = 基本活性化 + 拡散活性化 で並べる
 
           要旨   : 依頼と出来事の要旨の意味の近さ(他の出来事と比べてどれだけ際立つか)
@@ -518,10 +520,11 @@ class Brain:
           新しさ : 基本活性化 ln(Σ 経過時間^-d)。最近の出来事、最近思い出した出来事ほど高い
         """
         sim = getattr(self, "last_trace_sim", {})
-        concept_score = [sum(act.get(c, 0) for c in tr["concepts"]) for tr in self.traces]
+        traces = [tr for tr in self.traces if exclude_session is None or tr.get("session") != exclude_session]
+        concept_score = [sum(act.get(c, 0) for c in tr["concepts"]) for tr in traces]
         top_c = max(concept_score, default=0) or 1.0
         ranked = []
-        for tr, cs in zip(self.traces, concept_score):
+        for tr, cs in zip(traces, concept_score):
             # 依頼との類似度そのもので判断する(無関係な依頼でも、どれかは「他より際立って」近くなるため)
             gist = max(0.0, (sim.get(id(tr), 0.0) - GIST_ABS_MIN) / (GIST_ABS_FULL - GIST_ABS_MIN))
             base = math.log(sum((self.now - u + 1) ** -EP_DECAY for u in [tr["t"]] + tr.get("uses", [])))
