@@ -254,14 +254,18 @@ class Brain:
 
     # ---- 覚える(海馬に記録) ----
 
-    def learn(self, concepts, gist=None):
-        """出来事を覚える。gist はその出来事の要旨を表す文(指示文など。なければ概念を並べたもの)"""
+    def learn(self, concepts, gist=None, note=None):
+        """出来事を覚える
+
+        gist: その出来事の要旨を表す文(依頼文など。なければ概念を並べたもの)
+        note: 思い出したときに伝える中身(依頼・回答の抜粋、日時、会話の識別子など)
+        """
         concepts = list(dict.fromkeys(concepts))
         self.hippocampus.append({"concepts": concepts, "t": self.now, "nights": 0})
         if self.embedder:
             key = self.embedder.remember_gist(gist or " ".join(concepts))
             if key:
-                self.traces.append({"gist": key, "concepts": concepts, "t": self.now})
+                self.traces.append({"gist": key, "concepts": concepts, "t": self.now, **(note or {})})
         self.attend(concepts)
 
     # ---- 睡眠(固定化) ----
@@ -429,12 +433,15 @@ class Brain:
         概念(場所を含む)が思い浮かぶ。どの痕跡も指示と際立って近くなければ、何も呼び起こさない。
         戻り値: ({概念: 呼び起こされた強さ(合計1)}, 呼び起こしの確かさ 0〜1)
         """
+        self.last_trace_z = {}
         traces = [tr for tr in self.traces if tr["gist"] in self.embedder.index] if self.embedder else []
         if not traces:
             return {}, 0.0
         sims = self.embedder.similarities(text, [tr["gist"] for tr in traces])
         if sims is None:
             return {}, 0.0
+        zs = (sims - sims.mean()) / (float(sims.std()) or 1.0)
+        self.last_trace_z = {id(tr): float(z) for tr, z in zip(traces, zs)}
         order = sims.argsort()[::-1]
         best = float(sims[order[0]])
         z = (best - float(sims.mean())) / (float(sims.std()) or 1.0)

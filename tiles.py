@@ -23,16 +23,21 @@ SUPERSAMPLE = 2         # 2倍の大きさで描いて縮小し、線や文字�
 CACHE_TILES = 3000
 FONT = r"C:\Windows\Fonts\YuGothM.ttc"
 FONT_BOLD = r"C:\Windows\Fonts\YuGothB.ttc"
-# 線は半透明にして、重なるほど濃くなるようにする(線が密集したところが塗りつぶしにならないように)
-LINE_ALPHA_CORTEX = 70
-LINE_ALPHA_HIPPO = 60
+# 線は半透明(不透明度 0.3)にして、重なるほど濃くなるようにする。濃淡で線の密集具合が分かる。
+# 半透明を積み重ねるには下地が要るので、タイルは背景色で塗ってから描く
+# ただし線が数万本あると、どのズームでも1ピクセルに何本も重なって真っ黒になるので、
+# 混んでいるところでも真っ黒にならないよう、ズームごとに不透明度を下げる(上限 0.3)
+LINE_ALPHA_MAX = 0.3
+DENSE_DARKNESS = 0.85
 LABEL_MARGIN_PX = 160   # タイルの外にある点のラベルがはみ出してくる分も描く(タイルの境目でラベルが切れないように)
 
 THEMES = {
-    "light": {"cortex": (138, 135, 124), "hippo": (61, 127, 184), "ink": (29, 29, 27),
-              "node": (255, 255, 255), "place": (47, 125, 91), "place_bg": (224, 240, 231), "halo": (246, 245, 241)},
-    "dark": {"cortex": (143, 140, 128), "hippo": (111, 174, 224), "ink": (236, 235, 230),
-             "node": (42, 41, 37), "place": (95, 193, 147), "place_bg": (23, 56, 42), "halo": (22, 22, 20)},
+    "light": {"bg": (246, 245, 241), "line": (0, 0, 0), "hippo": (30, 100, 170), "ink": (29, 29, 27),
+              "node": (255, 255, 255), "edge": (90, 88, 80), "place": (47, 125, 91), "place_bg": (224, 240, 231),
+              "halo": (246, 245, 241)},
+    "dark": {"bg": (22, 22, 20), "line": (255, 255, 255), "hippo": (120, 180, 235), "ink": (236, 235, 230),
+             "node": (42, 41, 37), "edge": (160, 157, 145), "place": (95, 193, 147), "place_bg": (23, 56, 42),
+             "halo": (22, 22, 20)},
 }
 
 
@@ -101,6 +106,7 @@ class GraphMap:
             self._to_world()
             self._label_order()
             self.version = version
+            self._density = None
             self.cache.clear()
 
     def _layout(self):
@@ -249,7 +255,7 @@ class GraphMap:
         S = SUPERSAMPLE
         scale = 2 ** z                      # 世界座標 → px
         size = TILE * S
-        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        img = Image.new("RGB", (size, size), th["bg"])  # 不透明の画像に描くと、半透明の線が下の色と正しく混ざる
         draw = ImageDraw.Draw(img, "RGBA")
         n = len(self.ids)
         if n == 0:
@@ -263,6 +269,7 @@ class GraphMap:
         if len(self.edges):
             a, b = self.edges[:, 0].astype(int), self.edges[:, 1].astype(int)
             P, Q = self.world[a], self.world[b]
+            alpha = self.line_alpha(z)
             hit = ((np.minimum(P[:, 0], Q[:, 0]) <= x1) & (np.maximum(P[:, 0], Q[:, 0]) >= x0) &
                    (np.minimum(P[:, 1], Q[:, 1]) <= y1) & (np.maximum(P[:, 1], Q[:, 1]) >= y0))
             for k in np.where(hit)[0]:
@@ -270,11 +277,11 @@ class GraphMap:
                 px, py = to_px(P[k])
                 qx, qy = to_px(Q[k])
                 if kind == 1:
-                    col = th["hippo"] + (int(LINE_ALPHA_HIPPO * (0.4 + 0.6 * w)),)
-                    width = max(1, round(1 * S * grow))
+                    col = th["hippo"] + (alpha,)
+                    width = S
                 else:
-                    col = th["cortex"] + (int(LINE_ALPHA_CORTEX * (0.3 + 0.7 * w)),)
-                    width = max(1, round((0.6 + 3 * w) * S * grow))
+                    col = th["line"] + (alpha,)
+                    width = S
                 draw.line([(px, py), (qx, qy)], fill=col, width=width)
 
         # 点とラベル(ラベルがはみ出してくる分も含めて、少し広い範囲の点を描く)
@@ -305,13 +312,44 @@ class GraphMap:
                     draw.rectangle([px - r, py - r, px + r, py + r], fill=th["place"] + (255,))
                 continue
             r = max(1.0, (2 + min(5, math.sqrt(self.degree[i]))) * S * grow)
-            draw.ellipse([px - r, py - r, px + r, py + r], fill=th["node"] + (255,), outline=th["cortex"] + (255,), width=S)
+            draw.ellipse([px - r, py - r, px + r, py + r], fill=th["node"] + (255,), outline=th["edge"] + (255,), width=S)
             if label:
                 text = self.label_text(i)
                 l, t, r_, b_ = draw.textbbox((0, 0), text, font=font)
                 draw.text((px - (r_ - l) / 2 - l, py + r + 2 * S - t), text, font=font, fill=th["ink"] + (230,),
                           stroke_width=2 * S // 2, stroke_fill=th["halo"] + (200,))
         return _png(img.resize((TILE, TILE), Image.LANCZOS))
+
+    def line_alpha(self, z):
+        """ズーム z での線の不透明度(0〜255)
+
+        不透明度 a の線を k 本重ねた濃さは 1-(1-a)^k。図を細かいマス目に分けて線の密度を数えておき、
+        いちばん混んでいるあたり(上位1%)のマスでも濃さが DENSE_DARKNESS で止まる a を選ぶ。
+        そうすると真っ黒につぶれず、混み具合が濃淡として見える。マス目は図全体で共通なので、
+        タイルの境目で濃さが食い違わない。
+        """
+        if self._density is None:
+            self._density = self._line_density()
+        cell, p99 = self._density
+        k = p99 / (cell ** 2 * 2 ** z)       # 混んだマスで、1ピクセルに重なる線の本数(線幅1px)
+        alpha = 1 - (1 - DENSE_DARKNESS) ** (1 / max(k, 1e-9))
+        return max(2, int(255 * min(LINE_ALPHA_MAX, alpha)))
+
+    def _line_density(self, grid=512):
+        """マス目ごとの線の長さの合計(世界座標)。返り値: (マスの大きさ, 上位1%のマスの値)"""
+        cell = WORLD / grid
+        a, b = self.edges[:, 0].astype(int), self.edges[:, 1].astype(int)
+        P, Q = self.world[a], self.world[b]
+        length = np.sqrt(((Q - P) ** 2).sum(1))
+        n = np.maximum(1, np.ceil(length / (cell / 2)).astype(int))   # 線に沿って細かく点を打つ
+        idx = np.repeat(np.arange(len(n)), n)
+        t = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n) + 0.5) / np.repeat(n, n)
+        pts = P[idx] + (Q[idx] - P[idx]) * t[:, None]
+        cells = np.clip((pts / cell).astype(int), 0, grid - 1)
+        G = np.zeros((grid, grid))
+        np.add.at(G, (cells[:, 1], cells[:, 0]), (length / n)[idx])
+        nonzero = G[G > 0]
+        return cell, float(np.percentile(nonzero, 99)) if len(nonzero) else 1.0
 
     # ---- 問い合わせ ----
 
