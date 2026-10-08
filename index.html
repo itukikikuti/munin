@@ -224,6 +224,11 @@ function renderResult() {
         ? e.details.map(d => `<div class="ep-a"><span class="kind">${esc(d.kind)}</span>${esc(d.text.slice(0, 400))}</div>`).join("")
         : e.reply ? `<div class="ep-a">${esc(e.reply)}</div>` : ""}</div>`;
   let html = "";
+  if (r.todos && r.todos.length) html += `<h3>未完了のこと(期限・保留・連絡)</h3>` + r.todos.map(it => `<div class="ep-item">
+      <div class="ep-head"><a href="#" class="rid" data-id="${esc(it.id.split("-")[0])}" title="記録を開く">[${esc(it.id)}]</a>
+        <span class="chip">${esc(it.kind)}</span>${it.due ? `<span class="hint">${esc(it.due)}まで</span>` : ""}
+        ${it.places.map(p => `<span class="pl">${esc(p)}</span>`).join(" ")}</div>
+      <div class="ep-q">${esc(it.text)}</div></div>`).join("");
   if (r.episodes.length) html += `<h3>関係しそうな過去のやり取り</h3>` + r.episodes.map(ep).join("");
   if (r.places.length) html += `<h3>関係しそうな場所</h3><div class="chips">` +
     r.places.map(p => `<span class="chip place">${esc(p.name)} ${p.conf.toFixed(2)}</span>`).join("") + `</div>`;

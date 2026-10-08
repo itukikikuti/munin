@@ -15,9 +15,11 @@ import os
 import re
 import sys
 import time
+from datetime import date, datetime, timedelta
 from itertools import combinations
 
 from embed import Embedder
+from intentions import asks_todo
 
 # ---- パラメータ ----
 DECAY_D = 0.5                # 忘却の速さ(ACT-R の d)
@@ -61,6 +63,18 @@ DETAILS_SHOWN = 3            # 思い出した出来事ごとに、差し込む�
 PROMPT_HINT_CHARS = 60       # 差し込む文章に載せる、依頼の長さ
 DETAIL_HINT_CHARS = 120      # 差し込む文章に載せる、関係する部分の長さ
 HINTS_SHOWN = 6              # 思い出した出来事ごとに載せる、手がかりの語の数
+# 展望記憶(これからやること)
+DONE_OVERLAP = 3             # 後のやり取りと、何個の概念が重なれば同じ件とみなすか(完了の判定)
+INTENT_OVERDUE_DAYS = 7      # 期限をこの日数より過ぎたものは、もう追わない
+INTENT_FORGET_DAYS = 30      # 期限のないものは、この日数が経つと思い出さない
+INTENT_RECENT_DAYS = 7       # 新しい会話の最初に出す、期限のないもの(最近の保留・連絡)の新しさ
+INTENT_W_REL = 1.0           # 依頼との関係の重み
+INTENT_W_URGENCY = 1.0       # 期限の近さの重み
+INTENT_W_RECENT = 0.5        # 新しさの重み
+INTENT_KIND_BONUS = {"期限": 0.3, "連絡": 0.15, "保留": 0.0}   # 取り出しの精度が高い種類ほど前に出す
+INTENTS_SHOWN = 3            # 新しい会話の最初に出す数
+INTENTS_ASKED = 6            # これからやることを尋ねられたときに出す数
+TODO_CHARS = 100
 STALE_PLACE = 0.2            # 今はもうない場所の活性を何倍にするか
 SHOWN_PER_SESSION = 200      # 会話ごとに覚えておく、差し込んだ記憶の鍵の数
 SHOWN_SESSIONS = 50          # 差し込んだ記憶の鍵を覚えておく会話の数(古い会話の分は忘れる)
@@ -176,6 +190,11 @@ def recollection_text(r):
         return f"[{e['id']}] {when} {' '.join(e['places'])} 「{clip(e['prompt'], PROMPT_HINT_CHARS)}」".replace("  ", " ")
 
     lines = []
+    if r.get("todos"):
+        lines.append("未完了のこと(期限・保留・連絡):")
+        for it in r["todos"]:
+            due = f"{it['due'][5:].replace('-', '/')}まで " if it["due"] else ""
+            lines.append(f"- [{it['id']}] {due}{' '.join(it['places'])} 「{clip(it['text'], TODO_CHARS)}」".replace("  ", " "))
     if r["recent"]:
         lines.append("直前の作業:")
         lines += [f"- {head(e)}" for e in r["recent"]]
@@ -242,6 +261,8 @@ class Brain:
         # エピソード記憶の痕跡: 出来事ごとの要旨(意味のベクトルの鍵)と、含まれていた概念。
         # 海馬から皮質へ移ったあとも残る(多重痕跡理論)。古いものほど呼び起こされにくい
         self.traces = []       # {"gist": 要旨の鍵, "concepts": [...], "t": 記録時刻}
+        # 展望記憶: これからやること(期限・保留・連絡)。完了したら status が done になる
+        self.intentions = []
         self.context = {}      # 概念 -> [最後に意識した時刻, 注意を向けた順番]
         self.seq = 0           # 注意を向けた回数(時刻が同じでも、どれが新しい話題か分かるように)
         self._rev = 0          # 皮質が変わるたびに増える(つながりの計算を使い回すため)
@@ -258,6 +279,7 @@ class Brain:
                                 first=uses[0] if uses else None)
             self.hippocampus = s["hippocampus"]
             self.traces = s.get("traces", [])
+            self.intentions = s.get("intentions", [])
             self.seq = s.get("seq", 0)
             self.shown = s.get("shown", {})
             self.context = {c: v if isinstance(v, list) else [v, 0]
@@ -267,7 +289,7 @@ class Brain:
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({"now": self.now, "seq": self.seq, "cortex": self.cortex,
                        "hippocampus": self.hippocampus, "traces": self.traces, "context": self.context,
-                       "shown": self.shown},
+                       "shown": self.shown, "intentions": self.intentions},
                       f, ensure_ascii=False, separators=(",", ":"))
         if self.embedder:
             self.embedder.save()
@@ -520,6 +542,65 @@ class Brain:
             self.reinforce(strong_cues, answer, hits)
         return cues, fragments, answer
 
+    # ---- 展望記憶(これからやること) ----
+
+    def intend(self, items, concepts, ref, when):
+        """やり取りから取り出した「これからやること」を覚える"""
+        for i, it in enumerate(items):
+            self.intentions.append({"id": f"{(ref or '')[:SHORT_ID]}-{i + 1}", "ref": ref, "text": it["text"],
+                                    "due": it["due"], "kind": it["kind"], "concepts": concepts, "time": when,
+                                    "t": self.now, "status": "open"})
+
+    def settle(self, concepts, done):
+        """同じ件(概念が重なる)について完了したと分かったら、その「やること」を完了にする(再固定化)"""
+        if not done:
+            return
+        mine = {c for c in concepts if not is_place(c)}
+        for it in self.intentions:
+            if it["status"] == "open" and it["t"] < self.now:
+                if len(mine & {c for c in it["concepts"] if not is_place(c)}) >= DONE_OVERLAP:
+                    it["status"] = "done"
+                    it["done_t"] = self.now
+
+    def today(self):
+        """内部時計の今を、暦の日付にする(いちばん新しい出来事の日時から数える)"""
+        dated = [tr for tr in self.traces if tr.get("time")]
+        if not dated:
+            return None
+        latest = max(dated, key=lambda tr: tr["t"])
+        return (datetime.fromisoformat(latest["time"]) + timedelta(hours=self.now - latest["t"])).date()
+
+    def rank_intentions(self, act, asked):
+        """未完了の「やること」を、期限の近さ・依頼との関係・新しさで並べる
+
+        asked: 依頼が「やり残し」「次なにする」のように、これからやることを尋ねているか。
+        尋ねていないとき(新しい会話の最初)は、期限のあるものと最近のものだけを出す。
+        """
+        today = self.today()
+        open_items = [it for it in self.intentions if it["status"] == "open"]
+        rel = [sum(act.get(c, 0) for c in it["concepts"]) for it in open_items]
+        top = max(rel, default=0) or 1.0
+        ranked = []
+        for it, r in zip(open_items, rel):
+            age = (self.now - it["t"]) / 24
+            urgency = 0.0
+            if it["due"] and today:
+                days = (date.fromisoformat(it["due"]) - today).days
+                if days < -INTENT_OVERDUE_DAYS:       # 期限を大きく過ぎたものは、もう追わない
+                    continue
+                urgency = 1.0 if days <= 3 else 0.7 if days <= 14 else 0.3
+            elif age > INTENT_FORGET_DAYS:            # 期限のないものは、時間が経つと思い出さなくなる
+                continue
+            if not asked and not it["due"] and age > INTENT_RECENT_DAYS:
+                continue
+            score = (INTENT_W_REL * r / top + INTENT_W_URGENCY * urgency + INTENT_W_RECENT * (age + 1) ** -0.5
+                     + INTENT_KIND_BONUS.get(it["kind"], 0))
+            ranked.append((score, it))
+        ranked.sort(key=lambda x: -x[0])
+        n = INTENTS_ASKED if asked else INTENTS_SHOWN
+        return [{"id": it["id"], "ref": it["ref"], "text": it["text"], "due": it["due"], "kind": it["kind"],
+                 "places": [c for c in it["concepts"] if is_place(c)][:1]} for _, it in ranked[:n]]
+
     # ---- 関連することを思い出す(依頼に差し込む記憶) ----
 
     def recollect(self, text, use_context=True, reinforce=True, session=None):
@@ -554,7 +635,10 @@ class Brain:
             # 同じ会話ですでに差し込んだ記憶は、相手(Claude)がもう知っているので繰り返さない
             already = set(self.shown.get(session, []))
             shown = [e for e in shown if e["ref"] not in already]
-        result = {"ranked": episodes[:EPISODES_SHOWN * 2],
+        # 展望記憶: 新しい会話の最初と、これからやることを尋ねられたときに思い出す
+        asked = asks_todo(text)
+        todos = self.rank_intentions(act, asked) if new_conversation or asked else []
+        result = {"ranked": episodes[:EPISODES_SHOWN * 2], "todos": todos,
                   "episodes": shown[:EPISODES_SHOWN],
                   "concepts": [c for c in concepts if c["conf"] >= SHOW_CONF],
                   "places": [p for p in places if p["conf"] >= PLACE_SHOW_CONF][:PLACES_SHOWN],

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from janome.tokenizer import Tokenizer
 
 from brain import SLEEP_HOURS, Brain
+from intentions import extract, mentions_done
 from store import RESULT_CHARS, Store, build_record, tool_summary
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -315,7 +316,10 @@ class Life:
         if len(concepts) >= 2:
             note = {"prompt": excerpt(t["user"], PROMPT_EXCERPT), "reply": excerpt(t["reply"][-1] if t["reply"] else "", REPLY_EXCERPT),
                     "time": parse_time(t).isoformat(), "session": os.path.basename(t["session"]), "ref": record_key(t)}
+            # このやり取りで終わったことがあれば、前に覚えた「やること」を完了にしてから、新しい「やること」を覚える
+            self.brain.settle(concepts, mentions_done(t["user"] + "\n" + "\n".join(t["reply"][-2:])))
             self.brain.learn(concepts, gist=t["user"], note=note)  # 要旨は依頼文(その出来事が何についてだったか)
+            self.brain.intend(extract(t["user"], t["reply"], parse_time(t)), concepts, record_key(t), note["time"])
             self.learned += 1
 
     def experience(self, t):
