@@ -60,7 +60,8 @@ h3 { font-size: 12px; color: var(--muted); margin: 14px 0 6px; font-weight: 600;
 .ep-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ep-head .conf { margin-left: auto; }
 .ep-q { margin-top: 4px; font-weight: 600; }
-.ep-a { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.ep-a { margin-top: 4px; color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+.ep-a .kind { display: inline-block; font-size: 10px; padding: 0 5px; margin-right: 5px; border-radius: 3px; background: var(--line); color: var(--ink); }
 .pl { font-family: Consolas, monospace; font-size: 11px; color: var(--place); background: var(--place-soft); padding: 0 6px; border-radius: 4px; word-break: break-all; }
 .conf { display: inline-block; width: 50px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; vertical-align: middle; }
 .conf i { display: block; height: 100%; background: var(--accent); }
@@ -208,7 +209,9 @@ function renderResult() {
       <div class="ep-head"><span class="hint">${esc(e.when)}</span> ${e.places.map(p => `<span class="pl">${esc(p)}</span>`).join(" ")}
         ${e.conf != null ? conf(e.conf) : ""}</div>
       <div class="ep-q">${esc(e.prompt)}</div>
-      ${e.reply ? `<div class="ep-a">${esc(e.reply)}</div>` : ""}</div>`;
+      ${e.details && e.details.length
+        ? e.details.map(d => `<div class="ep-a"><span class="kind">${esc(d.kind)}</span>${esc(d.text.slice(0, 400))}</div>`).join("")
+        : e.reply ? `<div class="ep-a">${esc(e.reply)}</div>` : ""}</div>`;
   let html = "";
   if (r.episodes.length) html += `<h3>関係しそうな過去のやり取り</h3>` + r.episodes.map(ep).join("");
   if (r.places.length) html += `<h3>関係しそうな場所</h3><div class="chips">` +
