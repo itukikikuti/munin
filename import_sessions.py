@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from janome.tokenizer import Tokenizer
 
 from brain import SLEEP_HOURS, Brain
+from store import RESULT_CHARS, Store, build_record, tool_summary
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
@@ -152,6 +153,12 @@ def read_turns(limit=None):
                 if d.get("isSidechain") or d.get("isMeta") or d.get("isCompactSummary"):
                     continue
                 msg = d.get("message") or {}
+                if d.get("type") == "user" and cur is not None and isinstance(msg.get("content"), list):
+                    for c in msg["content"]:  # ツールの結果を、そのツールの実行に結びつける
+                        if c.get("type") == "tool_result" and c.get("tool_use_id") in cur["pending"]:
+                            step = cur["pending"].pop(c["tool_use_id"])
+                            step["result"] = text_of(c.get("content"))[:RESULT_CHARS]
+                            step["error"] = bool(c.get("is_error"))
                 if d.get("type") == "user":
                     text = text_of(msg.get("content"))
                     if not text.strip() or text.lstrip().startswith(("<", "[Request interrupted")):
@@ -162,14 +169,18 @@ def read_turns(limit=None):
                         continue
                     seen.add(key)
                     cur = {"t": d.get("timestamp"), "cwd": d.get("cwd"), "user": text, "session": path,
-                           "reply": [], "edited": [], "read": []}
+                           "uuid": d.get("uuid"), "reply": [], "edited": [], "read": [], "steps": [], "pending": {}}
                     turns.append(cur)
                 elif d.get("type") == "assistant" and cur is not None:
                     for b in msg.get("content") or []:
                         if b.get("type") == "text" and b.get("text", "").strip():
                             cur["reply"].append(b["text"])
+                            cur["steps"].append({"kind": "text", "text": b["text"]})
                         elif b.get("type") == "tool_use":
                             inp = b.get("input") or {}
+                            step = {"kind": "tool", "name": b.get("name"), "summary": tool_summary(b.get("name"), inp)}
+                            cur["steps"].append(step)
+                            cur["pending"][b.get("id")] = step
                             fp = inp.get("file_path") or inp.get("notebook_path")
                             if not fp:
                                 continue
@@ -178,6 +189,8 @@ def read_turns(limit=None):
                             if kind and fp not in cur[kind]:
                                 cur[kind].append(fp)
     print(file=sys.stderr)
+    for t in turns:
+        t.pop("pending", None)
     return [t for t in turns if t["t"]]
 
 
