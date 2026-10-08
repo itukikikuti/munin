@@ -125,6 +125,9 @@ def main():
         life.experience(t)
     print(file=sys.stderr)
     embedder.ensure(sorted(brain.known_concepts()), progress=True)
+    # 「それより前から記憶にあった」かどうかは、記憶モデルの状態(忘れたかどうか)ではなく、
+    # 過去のやり取りに出てきたかどうかで決める(睡眠を外すなど、記憶モデルを変えても正解の範囲が変わらないように)
+    seen = {c for tr in brain.traces for c in tr["concepts"]} | brain.known_concepts()
 
     results = []
     prev_session = None
@@ -133,12 +136,11 @@ def main():
         life.advance(t)
         first = t["session"] != prev_session
         prev_session = t["session"]
-        known = brain.known_concepts()
         actual = life.episode(t)
         prompt = t["user"].lower()
         session = os.path.basename(t["session"])
         in_conversation = {c for tr in brain.traces if tr.get("session") == session for c in tr["concepts"]}
-        truth = {c for c in actual if c in known and c.lower() not in prompt and c not in in_conversation}
+        truth = {c for c in actual if c in seen and c.lower() not in prompt and c not in in_conversation}
 
         r = brain.recollect(t["user"], session=session)
         sims = brain.last_trace_sim
@@ -161,6 +163,7 @@ def main():
             "text_recall": sum(c.lower() in r["text"].lower() for c in truth) / len(truth) if truth else None,
         })
         life.remember(t, concepts=actual)
+        seen |= set(actual)
     print(file=sys.stderr)
 
     with open(os.path.join(OUT, "memory_results.jsonl"), "w", encoding="utf-8") as f:
