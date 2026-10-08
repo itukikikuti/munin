@@ -57,7 +57,10 @@ EP_W_DETAIL = 1.0            # 出来事の記録の中に、依頼とよく合�
 CHUNK_SIM_MIN = 0.45         # 記録の部分(チャンク)と依頼の類似度がこれ以下なら、関係なしとみなす
 CHUNK_SIM_FULL = 0.70        # 類似度がこれ以上なら、十分に関係がある
 DETAILS_SHOWN = 3            # 思い出した出来事ごとに、差し込む部分の数
-DETAIL_CHARS = 300           # 差し込む部分1つの長さ
+PROMPT_HINT_CHARS = 60       # 差し込む文章に載せる、依頼の長さ
+DETAIL_HINT_CHARS = 120      # 差し込む文章に載せる、関係する部分の長さ
+HINTS_SHOWN = 6              # 思い出した出来事ごとに載せる、手がかりの語の数
+SHORT_ID = 8                 # 記録の鍵の、差し込む文章に載せる長さ(先頭から)
 CONCEPTS_SHOWN = 15
 PLACES_SHOWN = 3
 RECENT_SHOWN = 3
@@ -153,28 +156,44 @@ def retrieval_probability(a, tau, s):
 
 
 def recollection_text(r):
-    """思い出したことを、依頼に差し込む文章にする"""
+    """思い出したことを、依頼に差し込む文章にする
+
+    中身を全部渡すのではなく、記憶の手がかり(いつ・どこで・何の件か・関係しそうな語や部分)と、
+    詳しく見るための鍵だけを渡す。相手(Claude)は、手がかりをもとに自分で調べたり、鍵で記録を開いたりできる。
+    """
+    def head(e):
+        when = e["when"][5:].replace("-", "/") if e["when"] else ""
+        return f"[{e['id']}] {when} {' '.join(e['places'])} 「{clip(e['prompt'], PROMPT_HINT_CHARS)}」".replace("  ", " ")
+
     lines = []
     if r["recent"]:
         lines.append("直前の作業:")
-        lines += [f"- {e['when']} {' '.join(e['places'])} 依頼「{e['prompt']}」" for e in r["recent"]]
+        lines += [f"- {head(e)}" for e in r["recent"]]
     if r["episodes"]:
-        lines.append("関係しそうな過去のやり取り(確かさ順):")
+        lines.append("関係しそうな記憶(確かさ順):")
         for e in r["episodes"]:
-            lines.append(f"- {e['when']} {' '.join(e['places'])} 依頼「{e['prompt']}」(確かさ {e['conf']:.2f})")
-            if e["details"]:  # そのやり取りの中で、今の依頼と関係する部分
-                for d in e["details"]:
-                    text = " ".join(d["text"].split())
-                    lines.append(f"  - {d['kind']}: {text[:DETAIL_CHARS]}{'…' if len(text) > DETAIL_CHARS else ''}")
-            elif e["reply"]:
-                lines.append(f"  - 回答: {e['reply']}")
+            lines.append(f"- {head(e)} 確かさ{e['conf']:.2f}")
+            hints = []
+            if e["hints"]:
+                hints.append("手がかり: " + ", ".join(e["hints"]))
+            if e["details"]:  # そのやり取りの中で、今の依頼と最も関係する部分
+                d = e["details"][0]
+                hints.append(f"{d['kind']}「{clip(d['text'], DETAIL_HINT_CHARS)}」")
+            if hints:
+                lines.append("  " + " / ".join(hints))
     if r["places"]:
-        lines.append("関係しそうな場所: " + ", ".join(f"{p['name']} ({p['conf']:.2f})" for p in r["places"]))
+        lines.append("関係しそうな場所: " + ", ".join(p["name"] for p in r["places"]))
     if r["concepts"]:
         lines.append("関連する語・ファイル: " + ", ".join(c["name"] for c in r["concepts"]))
     if not lines:
         return ""
+    lines.append("([ ] は記録の鍵。詳しい中身は鍵で記録を開いて確認できる)")
     return "<思い出したこと>\n" + "\n".join(lines) + "\n</思い出したこと>"
+
+
+def clip(text, limit):
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def is_inside(inner, outer):
@@ -554,11 +573,16 @@ class Brain:
             view["activation"] = a
             # 依頼と関係する部分(依頼文そのものは見出しに出すので除く)
             view["details"] = [{"kind": k, "text": t, "sim": s} for s, k, t in parts if k != "依頼"][:DETAILS_SHOWN]
+            # 手がかり: その出来事の概念のうち、今思い浮かんでいるもの(場所は別に出すので除く)
+            view["hints"] = sorted((c for c in tr["concepts"] if not is_place(c) and act.get(c, 0) > 0),
+                                   key=lambda c: -act[c])[:HINTS_SHOWN]
             out.append(view)
         return out
 
     def episode_view(self, tr, conf):
+        ref = tr.get("ref") or ""
         return {"trace": tr, "conf": conf, "when": (tr.get("time") or "")[:16].replace("T", " "), "details": [],
+                "id": ref[:SHORT_ID], "ref": ref, "hints": [],
                 "prompt": tr.get("prompt", " / ".join(tr["concepts"])), "reply": tr.get("reply", ""),
                 "places": [c for c in tr["concepts"] if is_place(c)][:2], "concepts": tr["concepts"]}
 
