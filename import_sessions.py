@@ -38,6 +38,8 @@ MIN_DF = 2              # 2回以上の出来事に出てくる語だけ使う(�
 GENERIC_SESSION_RATIO = 0.3   # 3割を超えるセッションに出てくる語は、ありふれていて手がかりにならない
 GENERIC_MIN_SESSIONS = 3
 DAY_STARTS_AT = 4       # 1日の区切り(時)
+PROMPT_EXCERPT = 120    # 思い出したときに伝える、依頼の抜粋の長さ
+REPLY_EXCERPT = 200     # 思い出したときに伝える、回答の抜粋の長さ(最後の返答 = まとめ)
 
 STOPWORDS = set("""
 感じ 場合 状態 方法 必要 確認 修正 対応 問題 部分 内容 今回 以下 以上 一つ 二つ 全部 全体 結果 理由
@@ -294,16 +296,26 @@ class Life:
                     + [f for f in t["files"] if v.usable(f)][:MAX_FILES])
         return list(dict.fromkeys(concepts))
 
-    def remember(self, t):
-        """やり取りを体験したあと、海馬に記録する"""
-        concepts = self.episode(t)
+    def remember(self, t, concepts=None):
+        """やり取りを体験したあと、海馬に記録する(concepts: 先に作ってあれば、その出来事の概念)"""
+        concepts = self.episode(t) if concepts is None else concepts
         if len(concepts) >= 2:
-            self.brain.learn(concepts, gist=t["user"])  # 要旨は指示文(その出来事が何についてだったか)
+            note = {"prompt": excerpt(t["user"], PROMPT_EXCERPT), "reply": excerpt(t["reply"][-1] if t["reply"] else "", REPLY_EXCERPT),
+                    "time": parse_time(t).isoformat(), "session": os.path.basename(t["session"])}
+            self.brain.learn(concepts, gist=t["user"], note=note)  # 要旨は依頼文(その出来事が何についてだったか)
             self.learned += 1
 
     def experience(self, t):
         self.advance(t)
         self.remember(t)
+
+
+def excerpt(text, limit):
+    """思い出したときに伝える抜粋(Markdown の記号や改行を除いて、先頭から limit 文字)"""
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[*#|`>~_]+", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def parse_time(t):
