@@ -31,20 +31,29 @@ def gist_key(text):
     return "Q:" + hashlib.sha1(text[:MAX_TEXT].encode()).hexdigest()
 
 
+def doc_key(text):
+    """検索される側の文のベクトルを保存するときの鍵"""
+    return "D:" + hashlib.sha1(text[:MAX_TEXT].encode()).hexdigest()
+
+
 class Embedder:
-    def __init__(self, cache_path):
-        """cache_path は拡張子なしの基準パス(.json に鍵、.npy にベクトルを保存)"""
+    def __init__(self, cache_path, model=EMBED_MODEL, dim=EMBED_DIM, instruct=QUERY_INSTRUCT):
+        """cache_path は拡張子なしの基準パス(.json に鍵、.npy にベクトルを保存)
+
+        model・dim・instruct を変えると、別のモデルで別のキャッシュを持つ埋め込みとして使える
+        """
+        self.model, self.dim, self.instruct = model, dim, instruct
         self.base = os.path.splitext(cache_path)[0]
         self.index = {}             # 鍵(概念の名前、または要旨の鍵) -> 行番号
         self.rows = []              # 追加分のベクトル(必要になったときに行列へまとめる)
-        self._matrix = np.zeros((0, EMBED_DIM), np.float32)
+        self._matrix = np.zeros((0, dim), np.float32)
         self.dirty = False
         self.available = True
         self._last_query = None
         try:
             with open(self.base + ".json", encoding="utf-8") as f:
                 meta = json.load(f)
-            if meta["model"] == EMBED_MODEL and meta["dim"] == EMBED_DIM:
+            if meta["model"] == model and meta["dim"] == dim:
                 self._matrix = np.load(self.base + ".npy")
                 self.index = {n: i for i, n in enumerate(meta["names"])}
         except (OSError, ValueError, KeyError):
@@ -63,11 +72,11 @@ class Embedder:
         self.dirty = True
 
     def _request(self, texts):
-        body = json.dumps({"model": EMBED_MODEL, "input": texts}).encode()
+        body = json.dumps({"model": self.model, "input": texts}).encode()
         req = urllib.request.Request(f"{OLLAMA_URL}/api/embed", body,
                                      {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=600) as res:
-            v = np.array(json.load(res)["embeddings"], np.float32)[:, :EMBED_DIM]
+            v = np.array(json.load(res)["embeddings"], np.float32)[:, :self.dim]
         return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
 
     def save(self):
@@ -76,7 +85,7 @@ class Embedder:
         names = sorted(self.index, key=self.index.get)
         np.save(self.base + ".npy", self.matrix)
         with open(self.base + ".json", "w", encoding="utf-8") as f:
-            json.dump({"model": EMBED_MODEL, "dim": EMBED_DIM, "names": names}, f, ensure_ascii=False)
+            json.dump({"model": self.model, "dim": self.dim, "names": names}, f, ensure_ascii=False)
         self.dirty = False
 
     def _fill(self, keys, inputs, batch, progress, label):
@@ -102,9 +111,15 @@ class Embedder:
 
     def ensure_gists(self, texts, progress=False):
         """未計算の要旨のベクトルを問い合わせる。使えなければ False"""
-        todo = {gist_key(t): QUERY_INSTRUCT + t[:MAX_TEXT] for t in texts}
+        todo = {gist_key(t): self.instruct + t[:MAX_TEXT] for t in texts}
         missing = [k for k in todo if k not in self.index]
         return self._fill(missing, [todo[k] for k in missing], QUERY_BATCH, progress, "要旨の埋め込み")
+
+    def ensure_docs(self, texts, progress=False):
+        """検索される側の文(指示文を付けない)のベクトルを問い合わせる。鍵は doc_key(文)"""
+        todo = {doc_key(t): t[:MAX_TEXT] for t in texts}
+        missing = [k for k in todo if k not in self.index]
+        return self._fill(missing, [todo[k] for k in missing], BATCH, progress, "文の埋め込み")
 
     def gist(self, text):
         """文の要旨のベクトル(計算済みなら使い回す)。使えなければ None"""
@@ -115,7 +130,7 @@ class Embedder:
         if self._last_query and self._last_query[0] == key:
             return self._last_query[1]
         try:
-            q = self._request([QUERY_INSTRUCT + text[:MAX_TEXT]])[0]
+            q = self._request([self.instruct + text[:MAX_TEXT]])[0]
         except OSError:
             self.available = False
             return None
