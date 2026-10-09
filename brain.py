@@ -56,6 +56,11 @@ CHOICE_T = 0.03              # 場所の選択規則の温度(ACT-R の t)。小
 SHOW_CONF = 0.4              # この確かさ以上のものだけ差し込む(確かさ = 実際に関係している確率の目安)
 PLACE_SHOW_CONF = 0.2
 EPISODES_SHOWN = 5
+SUPERSEDE_PENALTY = 0.0      # 同じ件のより新しい出来事があるとき、古い出来事の活性から引く量(0 なら干渉なし)
+SUPERSEDE_OVERLAP = 3        # 何個の概念(場所を除く)が重なれば同じ件とみなすか
+SUPERSEDE_POOL = 30          # 干渉を考える、候補の上位の数
+ABSTAIN = False              # 確かな出来事を1つも思い出せないとき(会話の最初を除く)、語や場所も差し込まない
+CANDIDATES_KEPT = 50        # 評価用に残す、並べた出来事の上位の数(候補の段階での取りこぼしを測る)
 EP_W_KEYWORD = 0.5           # 出来事の記録に、依頼の語が文字どおり含まれるかの重み
 KEYWORD_TERMS = 12           # キーワード検索に使う、依頼の語の数
 EP_W_DETAIL = 1.0            # 出来事の記録の中に、依頼とよく合う部分があるかの重み
@@ -64,6 +69,7 @@ CHUNK_SIM_FULL = 0.70        # 類似度がこれ以上なら、十分に関係�
 DETAILS_SHOWN = 3            # 思い出した出来事ごとに、差し込む部分の数
 PROMPT_HINT_CHARS = 60       # 差し込む文章に載せる、依頼の長さ
 DETAIL_HINT_CHARS = 120      # 差し込む文章に載せる、関係する部分の長さ
+FIRST_DETAIL_CHARS = 120     # いちばん確かな記憶について載せる、関係する部分の長さ
 HINTS_SHOWN = 6              # 思い出した出来事ごとに載せる、手がかりの語の数
 # 展望記憶(これからやること)
 DONE_OVERLAP = 3             # 後のやり取りと、何個の概念が重なれば同じ件とみなすか(完了の判定)
@@ -202,14 +208,14 @@ def recollection_text(r):
         lines += [f"- {head(e)}" for e in r["recent"]]
     if r["episodes"]:
         lines.append("関係しそうな記憶(確かさ順):")
-        for e in r["episodes"]:
+        for i, e in enumerate(r["episodes"]):
             lines.append(f"- {head(e)} 確かさ{e['conf']:.2f}")
             hints = []
             if e["hints"]:
                 hints.append("手がかり: " + ", ".join(e["hints"]))
-            if e["details"]:  # そのやり取りの中で、今の依頼と最も関係する部分
+            if e["details"]:  # そのやり取りの中で、今の依頼と最も関係する部分(いちばん確かな記憶は詳しめに)
                 d = e["details"][0]
-                hints.append(f"{d['kind']}「{clip(d['text'], DETAIL_HINT_CHARS)}」")
+                hints.append(f"{d['kind']}「{clip(d['text'], FIRST_DETAIL_CHARS if i == 0 else DETAIL_HINT_CHARS)}」")
             if hints:
                 lines.append("  " + " / ".join(hints))
     if r["places"]:
@@ -640,10 +646,12 @@ class Brain:
         # 展望記憶: 新しい会話の最初と、これからやることを尋ねられたときに思い出す
         asked = asks_todo(text)
         todos = self.rank_intentions(act, asked) if new_conversation or asked else []
+        # 確かな出来事を1つも思い出せないなら、語や場所だけを出しても当て推量になる(何も入れない判断)
+        abstain = ABSTAIN and not shown and not new_conversation
         result = {"ranked": episodes[:EPISODES_SHOWN * 2], "todos": todos,
                   "episodes": shown[:EPISODES_SHOWN],
-                  "concepts": [c for c in concepts if c["conf"] >= SHOW_CONF],
-                  "places": [p for p in places if p["conf"] >= PLACE_SHOW_CONF][:PLACES_SHOWN],
+                  "concepts": [] if abstain else [c for c in concepts if c["conf"] >= SHOW_CONF],
+                  "places": [] if abstain else [p for p in places if p["conf"] >= PLACE_SHOW_CONF][:PLACES_SHOWN],
                   "recent": recent, "cues": cues, "answer": answer}
         result["text"] = recollection_text(result)
         if reinforce:
@@ -679,6 +687,7 @@ class Brain:
         concept_score = [sum(act.get(c, 0) for c in tr["concepts"]) for tr in traces]
         top_c = max(concept_score, default=0) or 1.0
         ranked = []
+        features = {}
         for tr, cs in zip(traces, concept_score):
             # 依頼との類似度そのもので判断する(無関係な依頼でも、どれかは「他より際立って」近くなるため)
             gist = max(0.0, (sim.get(id(tr), 0.0) - GIST_ABS_MIN) / (GIST_ABS_FULL - GIST_ABS_MIN))
@@ -690,7 +699,13 @@ class Brain:
                  + on("recency") * EP_W_BASE * base + on("detail") * EP_W_DETAIL * detail
                  + EP_W_KEYWORD * keyword.get(tr.get("ref"), 0.0) / top_k)
             ranked.append((a, tr, parts))
+            features[id(tr)] = {"gist": gist, "concept": cs / top_c, "base": base, "detail": detail,
+                                "keyword": keyword.get(tr.get("ref"), 0.0) / top_k}
         ranked.sort(key=lambda x: -x[0])
+        self.last_features = features   # 評価用: 並べ方の重みをデータから推定するため
+        if SUPERSEDE_PENALTY:
+            ranked = self.interfere(ranked)
+        self.last_candidates = [tr for _, tr, _ in ranked[:CANDIDATES_KEPT]]   # 評価用: 候補の段階で何が拾えていたか
         out = []
         for a, tr, parts in ranked[:EPISODES_SHOWN * 4]:
             view = self.episode_view(tr, retrieval_probability(a, EP_TAU, EP_S))
@@ -702,6 +717,23 @@ class Brain:
                                    key=lambda c: -act[c])[:HINTS_SHOWN]
             out.append(view)
         return out
+
+    @staticmethod
+    def interfere(ranked):
+        """新しい出来事が、同じ件の古い出来事を思い出しにくくする(逆向干渉)
+
+        主人公を「セナ」から「カイ」に変えたように、同じ件(概念が重なる)について後から別の出来事があると、
+        古い方は今の状態ではなくなっている。候補の上位の中で、同じ件のより新しい出来事があれば、古い方の活性を下げる。
+        """
+        pool = ranked[:SUPERSEDE_POOL]
+        topics = [{c for c in tr["concepts"] if not is_place(c)} for _, tr, _ in pool]
+        out = []
+        for i, (a, tr, parts) in enumerate(pool):
+            newer = any(pool[j][1]["t"] > tr["t"] and len(topics[i] & topics[j]) >= SUPERSEDE_OVERLAP
+                        for j in range(len(pool)) if j != i)
+            out.append((a - SUPERSEDE_PENALTY if newer else a, tr, parts))
+        out.sort(key=lambda x: -x[0])
+        return out + ranked[SUPERSEDE_POOL:]
 
     def query_terms(self, text):
         """キーワード検索に使う語: 依頼の名詞、英数字の語(型番・ファイル名など)、名前が一致した概念"""

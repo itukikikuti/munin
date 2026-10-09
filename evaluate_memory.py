@@ -5,7 +5,7 @@
   python evaluate_memory.py --ablate sleep       ※ 仕組みを1つ外して評価する(どの仕組みが効いているかを切り分ける)
   python evaluate_memory.py --train 900          ※ 学習に使うやり取りを、評価期間の直前の900件に絞る(速く試したいとき)
 
-期間の分け方: 最新の TEST_N 件は最終確認用に取り置き、調整のあいだは使わない。その手前の VALID_N 件を調整用にする。
+期間の分け方: TEST_FROM 以降は最終確認用に取り置き、調整のあいだは使わない。その手前の VALID_N 件を調整用にする。
 パラメータを調整用の期間に合わせ込んでも、最終確認用の期間で本当の実力を確かめられる。
 
 過去のやり取り(学習分)で記憶を作ったあと、評価分のやり取りを時刻順に1件ずつ、
@@ -39,7 +39,7 @@ import numpy as np
 import brain as brain_module
 from brain import EP_S, EP_TAU, EPISODES_SHOWN, Brain
 from embed import Embedder
-from import_sessions import Life, load_turns, store_records
+from import_sessions import Life, load_turns, record_key, store_records
 from store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,9 +47,18 @@ DATA = os.environ.get("BRAIN_DATA", HERE)   # 埋め込みのキャッシュと�
 OUT = os.path.join(DATA, "eval")
 K = EPISODES_SHOWN
 METHODS = ["記憶モデル", "RAG", "直近", "キーワード"]
-TEST_N = 300            # 最終確認用に取り置く、最新のやり取りの数
-VALID_N = 300           # 調整用の期間のやり取りの数
+# 最終確認用の期間の始まり(UTC)。これ以降のやり取りは、調整のあいだは使わない。
+# 日時で固定しておくと、新しいやり取りが増えても調整用の期間はずれず、増えた分は最終確認用に入る
+TEST_FROM = "2026-10-05T03:00"
+VALID_N = 300           # 調整用の期間のやり取りの数(最終確認用の期間の直前)
 CONF_BINS = [(0.0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.01)]
+CANDIDATES = 50         # 候補の段階での再現率を測るときの件数
+DEV_PLACE = "brain-memory"
+
+
+def is_dev(t):
+    """brain-memory 自体を作っているやり取りか(試しに思い出させた質問や結果が多く、評価を歪めうる)"""
+    return any(DEV_PLACE in p.lower() for p in t["places"] + [t["cwd"] or ""])
 
 
 def relevant(concepts, used):
@@ -91,7 +100,15 @@ def main():
     ap.add_argument("--mode", choices=["valid", "test"], default="valid")
     ap.add_argument("--train", type=int, default=None, help="学習に使う、評価期間の直前のやり取りの数")
     ap.add_argument("--ablate", default="", help="外す仕組み(カンマ区切り): " + ", ".join(brain_module.ABLATIONS))
+    ap.add_argument("--tag", default="", help="結果のファイル名に付ける名前(設定を変えて比べるとき)")
+    ap.add_argument("--set", action="append", default=[], metavar="名前=値",
+                    help="brain.py の定数を変えて評価する(例: --set SUPERSEDE_PENALTY=0.3)")
     args = ap.parse_args()
+    for kv in args.set:
+        name, value = kv.split("=", 1)
+        if not hasattr(brain_module, name):
+            raise SystemExit(f"brain.py に {name} という定数はない")
+        setattr(brain_module, name, type(getattr(brain_module, name))(eval(value)))
     brain_module.ABLATE = {a for a in args.ablate.split(",") if a}
     unknown = brain_module.ABLATE - set(brain_module.ABLATIONS)
     if unknown:
@@ -99,10 +116,14 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     t0 = time.time()
 
-    turns = load_turns()
+    store = Store(os.path.join(DATA, "records.sqlite"))   # やり取りの記録は事実なので、本番と共有する
+    turns = load_turns(store=store)
+    n_valid = sum(t["t"] < TEST_FROM for t in turns)
     if args.mode == "valid":
-        turns = turns[:-TEST_N]          # 最終確認用の期間は見ない
-    train, test = turns[:-VALID_N if args.mode == "valid" else -TEST_N], turns[-VALID_N if args.mode == "valid" else -TEST_N:]
+        turns = turns[:n_valid]          # 最終確認用の期間は見ない
+        train, test = turns[:-VALID_N], turns[-VALID_N:]
+    else:
+        train, test = turns[:n_valid], turns[n_valid:]
     if args.train:
         train = train[-args.train:]
         turns = train + test
@@ -114,7 +135,6 @@ def main():
     state = os.path.join(OUT, "state_memory.json")
     if os.path.exists(state):
         os.remove(state)
-    store = Store(os.path.join(DATA, "records.sqlite"))   # やり取りの記録は事実なので、本番と共有する
     store_records(store, turns)
     brain = Brain(state, embedder=embedder, store=store)
     brain.check_places = False   # 過去の時点で思い出すので、今の時点で場所があるかは確かめない(未来の情報が混ざる)
@@ -145,7 +165,8 @@ def main():
         r = brain.recollect(t["user"], session=session)
         sims = brain.last_trace_sim
         traces = [tr for tr in brain.traces if tr.get("session") != session]
-        rag = sorted(traces, key=lambda tr: -sims.get(id(tr), 0))[:K]
+        rag_all = sorted(traces, key=lambda tr: -sims.get(id(tr), 0))
+        rag = rag_all[:K]
         recent = sorted(traces, key=lambda tr: -tr["t"])[:K]
         kw = sorted(traces, key=lambda tr: (-sum(c.lower() in prompt for c in tr["concepts"]), -tr["t"]))[:K]
         picks = {"記憶モデル": [e["concepts"] for e in r["ranked"][:K]], "RAG": [tr["concepts"] for tr in rag],
@@ -153,12 +174,22 @@ def main():
         shown = ([e["concepts"] for e in r["episodes"]] + [[c["name"] for c in r["concepts"]]]
                  + [[p["name"] for p in r["places"]]] + [e["concepts"] for e in r["recent"]])
         results.append({
-            "prompt": t["user"][:150], "first": first, "truth": sorted(truth),
+            "key": record_key(t), "prompt": t["user"][:150], "first": first, "truth": sorted(truth),
+            "dev": is_dev(t),
             "scores": {m: score(picks[m], truth, set(actual)) for m in METHODS} if truth else None,
+            # 候補の段階(上位 CANDIDATES 件)で、正解の情報を含むやり取りが拾えていたか
+            "candidate_recall": {
+                "記憶モデル": score([tr["concepts"] for tr in brain.last_candidates[:CANDIDATES]], truth, set(actual))[0],
+                "RAG": score([tr["concepts"] for tr in rag_all[:CANDIDATES]], truth, set(actual))[0],
+            } if truth else None,
             "shown_recall": score(shown, truth, set(actual))[0] if truth else None,
             "episodes": [{"activation": e["activation"], "relevant": relevant(e["concepts"], set(actual))}
                          for e in r["ranked"]],
             "text_len": len(r["text"]),
+            # 候補ごとの特徴と当たり外れ(fit_ranking.py で、並べ方の重みを推定するのに使う)
+            "cands": [{"f": brain.last_features[id(tr)], "rel": relevant(tr["concepts"], set(actual)),
+                       "hits": sorted(set(tr["concepts"]) & truth)} for tr in brain.last_candidates[:CANDIDATES]]
+                     if truth else None,
             # 差し込む文章の中に、実際に使われた情報がそのまま出てくる割合
             "text_recall": sum(c.lower() in r["text"].lower() for c in truth) / len(truth) if truth else None,
         })
@@ -166,12 +197,14 @@ def main():
         seen |= set(actual)
     print(file=sys.stderr)
 
-    with open(os.path.join(OUT, "memory_results.jsonl"), "w", encoding="utf-8") as f:
+    name = args.mode + (f"_{'_'.join(sorted(brain_module.ABLATE))}" if brain_module.ABLATE else "") \
+        + (f"_{args.tag}" if args.tag else "")
+    # 1件ずつの結果(compare_runs.py で、同じ問題どうしの勝ち負けを比べるのに使う)
+    with open(os.path.join(OUT, f"memory_results_{name}.jsonl"), "w", encoding="utf-8") as f:
         for x in results:
             f.write(json.dumps(x, ensure_ascii=False) + "\n")
     report = make_report(results, train, test, time.time() - t0, args)
-    name = f"memory_report_{args.mode}" + (f"_{'_'.join(sorted(brain_module.ABLATE))}" if brain_module.ABLATE else "")
-    with open(os.path.join(OUT, name + ".md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(OUT, f"memory_report_{name}.md"), "w", encoding="utf-8") as f:
         f.write(report)
     print(report)
 
@@ -184,6 +217,7 @@ def make_report(results, train, test, seconds, args):
     lines = ["# 関連することを思い出せるかの自動評価", "",
              f"- 期間: {'調整用' if args.mode == 'valid' else '最終確認用'}"
              + (f" / 外した仕組み: {', '.join(sorted(brain_module.ABLATE))}" if brain_module.ABLATE else ""),
+             f"- 変えた設定: {', '.join(args.set) or 'なし'}",
              f"- 学習: {len(train)}件({train[0]['t'][:10]}〜{train[-1]['t'][:10]})",
              f"- 評価: {len(test)}件({test[0]['t'][:10]}〜{test[-1]['t'][:10]})。"
              f"正解の情報(以前から記憶にあった、実際に使われた情報)があるもの {len(scored)}件",
@@ -196,12 +230,26 @@ def make_report(results, train, test, seconds, args):
     for m in METHODS:
         lines.append(f"| {m} | {mean(scored, m, 0):.1%} | {mean(scored, m, 1):.1%} | "
                      f"{mean(first, m, 0):.1%}({len(first)}件) | {mean(later, m, 0):.1%}({len(later)}件) |")
+    clean = [x for x in scored if not x["dev"]]
+    lines += ["", f"brain-memory 自体を作っているやり取り({len(scored) - len(clean)}件)を除いた {len(clean)}件では:", "",
+              "| 方式 | 再現率 | 適合率 |", "|---|---|---|"]
+    for m in METHODS:
+        lines.append(f"| {m} | {mean(clean, m, 0):.1%} | {mean(clean, m, 1):.1%} |")
+    cand = lambda m: sum(x["candidate_recall"][m] for x in scored) / max(len(scored), 1)
+    lines += ["", f"候補の段階(上位{CANDIDATES}件)での再現率: 記憶モデル {cand('記憶モデル'):.1%} / RAG {cand('RAG'):.1%}。"
+              f"上位{K}件との差が、最後の並べ方で落としている分。"]
     shown_rec = sum(x["shown_recall"] for x in scored) / max(len(scored), 1)
     text_rec = sum(x["text_recall"] for x in scored) / max(len(scored), 1)
     avg_len = sum(x["text_len"] for x in results) / max(len(results), 1)
+    # 正解の情報がない(過去の記憶が要らなかった)やり取りでは、何も差し込まないのが理想
+    idle = [x for x in results if not x["scores"] and not x["first"]]
+    idle_len = sum(x["text_len"] for x in idle) / max(len(idle), 1)
+    idle_empty = sum(x["text_len"] == 0 for x in idle) / max(len(idle), 1)
     lines += ["", f"記憶モデルが実際に差し込む内容(確かさで絞ったやり取り+語・場所+直前の作業)の再現率は "
               f"{shown_rec:.1%}。差し込む文章の中に、実際に使われた情報がそのまま書かれている割合は {text_rec:.1%}。"
-              f"差し込む文章の長さは平均 {avg_len:.0f}文字。", ""]
+              f"差し込む文章の長さは平均 {avg_len:.0f}文字。",
+              f"過去の記憶が要らなかったやり取り(会話の途中、{len(idle)}件)では、平均 {idle_len:.0f}文字を差し込み、"
+              f"{idle_empty:.0%}で何も差し込まなかった。", ""]
 
     # 確信度: 前半で ACT-R の検索確率の τ と s を推定し、後半で確かめる
     half = len(results) // 2

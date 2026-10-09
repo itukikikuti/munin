@@ -23,6 +23,7 @@ QUERY_INSTRUCT = ("Instruct: Given a user's request about their work, "
                   "retrieve the concept names it refers to\nQuery: ")
 MAX_TEXT = 2000          # 貼り付けたログなどで長すぎる文は、先頭だけで要旨をとる
 BATCH = 64
+KEEP_ALIVE = "30m"
 QUERY_BATCH = 16
 
 
@@ -72,7 +73,8 @@ class Embedder:
         self.dirty = True
 
     def _request(self, texts):
-        body = json.dumps({"model": self.model, "input": texts}).encode()
+        # モデルを読み込み直すと数秒かかるので、使い終わってもしばらく載せたままにする
+        body = json.dumps({"model": self.model, "input": texts, "keep_alive": KEEP_ALIVE}).encode()
         req = urllib.request.Request(f"{OLLAMA_URL}/api/embed", body,
                                      {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=600) as res:
