@@ -3,7 +3,7 @@
   python fit_ranking.py valid_import      ※ eval/memory_results_<名前>.jsonl を使う
 
 記憶モデルは、候補の上位50件には正解の情報を半分近く拾えているのに、上位5件に絞ると半分以下になる。
-最後の並べ方(要旨・概念・新しさ・細部・キーワードの重みづけの和)を、手で決めた重みではなく、
+最後の並べ方(要旨・概念・新しさ・細部・キーワード・場所の重みづけの和)を、手で決めた重みではなく、
 実際に関係していたかどうかから推定する(ACT-R でパラメータを実験データから推定するのと同じ考え方)。
 
 合わせ込みすぎを避けるため、評価期間の前半で推定して後半で確かめ、逆向きでも確かめる。
@@ -17,10 +17,11 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(os.environ.get("BRAIN_DATA", HERE), "eval")
-FEATURES = ["gist", "concept", "base", "detail", "keyword"]
+FEATURES = ["gist", "concept", "base", "detail", "keyword", "place"]
 K = 5
 GRID = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
 BASE_GRID = [0.0, 0.02, 0.05, 0.1, 0.2, 0.4]
+PLACE_GRID = [0.0, 0.25, 0.5, 1.0]
 
 
 def prepare(items):
@@ -28,7 +29,7 @@ def prepare(items):
     out = []
     for x in items:
         index = {c: i for i, c in enumerate(x["truth"])}
-        feats = np.array([[c["f"][f] for f in FEATURES] for c in x["cands"]])
+        feats = np.array([[c["f"].get(f, 0.0) for f in FEATURES] for c in x["cands"]])
         masks = [sum(1 << index[h] for h in c["hits"]) for c in x["cands"]]
         out.append((feats, masks, len(x["truth"])))
     return out
@@ -50,9 +51,9 @@ def recall_at_k(items, w):
 def fit(items):
     """要旨の重みを1に固定して(全体の大きさは並び順に関係しない)、残りの重みを格子で探す"""
     best, best_w = -1, None
-    for c, d, k in itertools.product(GRID, GRID, GRID):
+    for c, d, k, p in itertools.product(GRID, GRID, GRID, PLACE_GRID):
         for b in BASE_GRID:
-            w = {"gist": 1.0, "concept": c, "base": b, "detail": d, "keyword": k}
+            w = {"gist": 1.0, "concept": c, "base": b, "detail": d, "keyword": k, "place": p}
             r = recall_at_k(items, w)
             if r > best:
                 best, best_w = r, w
@@ -67,7 +68,7 @@ def main():
     with open(os.path.join(OUT, f"memory_results_{name}.jsonl"), encoding="utf-8") as f:
         items = prepare([x for x in map(json.loads, f) if x.get("cands")])
     now = {"gist": brain.EP_W_GIST, "concept": brain.EP_W_CONCEPT, "base": brain.EP_W_BASE,
-           "detail": brain.EP_W_DETAIL, "keyword": brain.EP_W_KEYWORD}
+           "detail": brain.EP_W_DETAIL, "keyword": brain.EP_W_KEYWORD, "place": brain.EP_W_PLACE}
     half = len(items) // 2
     a, b = items[:half], items[half:]
     print(f"{len(items)}件(前半 {len(a)} / 後半 {len(b)})")

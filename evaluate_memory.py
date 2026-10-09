@@ -12,8 +12,8 @@
 「依頼から関連することを思い出させる → 実際の出来事を覚えさせる」の順で体験させる。
 
 正解: そのやり取りで実際に使われた語・ファイル・場所(依頼と Claude の回答から取り出した概念)のうち、
-      それより前から記憶にあったもの。ただし、依頼文にそのまま書いてある語と、今の会話にすでに出てきた
-      情報は除く(Claude が会話の中ですでに知っているので、差し込む価値がない)。
+      それより前から記憶にあったもの。ただし、依頼文にそのまま書いてある語、今の会話にすでに出てきた
+      情報、今の作業フォルダ(とそれを含む場所)は除く(Claude がすでに知っているので、差し込む価値がない)。
 どの方式も、今の会話のやり取りは思い出す対象から外す。
 比べる方式(どれも過去のやり取りを5件思い出す):
   記憶モデル : 要旨・概念の活性・新しさ・細部を合わせた ACT-R の活性で選ぶ
@@ -37,7 +37,7 @@ import time
 import numpy as np
 
 import brain as brain_module
-from brain import EP_S, EP_TAU, EPISODES_SHOWN, Brain
+from brain import EP_S, EP_TAU, EPISODES_SHOWN, Brain, at_place, is_place, recollection_text
 from embed import Embedder
 from import_sessions import Life, load_turns, record_key, store_records
 from store import Store
@@ -52,7 +52,8 @@ METHODS = ["記憶モデル", "RAG", "直近", "キーワード"]
 TEST_FROM = "2026-10-05T03:00"
 VALID_N = 300           # 調整用の期間のやり取りの数(最終確認用の期間の直前)
 CONF_BINS = [(0.0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.01)]
-CANDIDATES = 50         # 候補の段階での再現率を測るときの件数
+SECTIONS = ["todos", "recent", "episodes", "places", "concepts"]
+CANDIDATES = 50        # 候補の段階での再現率を測るときの件数
 DEV_PLACE = "brain-memory"
 
 
@@ -160,9 +161,12 @@ def main():
         prompt = t["user"].lower()
         session = os.path.basename(t["session"])
         in_conversation = {c for tr in brain.traces if tr.get("session") == session for c in tr["concepts"]}
-        truth = {c for c in actual if c in seen and c.lower() not in prompt and c not in in_conversation}
+        # 今の作業フォルダ(とそれを含む場所)は、Claude がすでに知っているので、思い出す価値がない
+        here = {c for c in actual if t["cwd"] and is_place(c) and at_place(t["cwd"], c)}
+        truth = {c for c in actual if c in seen and c.lower() not in prompt and c not in in_conversation
+                 and c not in here}
 
-        r = brain.recollect(t["user"], session=session)
+        r = brain.recollect(t["user"], session=session, cwd=t["cwd"])
         sims = brain.last_trace_sim
         traces = [tr for tr in brain.traces if tr.get("session") != session]
         rag_all = sorted(traces, key=lambda tr: -sims.get(id(tr), 0))
@@ -186,6 +190,8 @@ def main():
             "episodes": [{"activation": e["activation"], "relevant": relevant(e["concepts"], set(actual))}
                          for e in r["ranked"]],
             "text_len": len(r["text"]),
+            # 差し込む文章のうち、各部分(やること・直前の作業・出来事・場所・語)が占める長さ
+            "text_parts": {k: len(recollection_text({**r, **{o: [] for o in SECTIONS if o != k}})) for k in SECTIONS},
             # 候補ごとの特徴と当たり外れ(fit_ranking.py で、並べ方の重みを推定するのに使う)
             "cands": [{"f": brain.last_features[id(tr)], "rel": relevant(tr["concepts"], set(actual)),
                        "hits": sorted(set(tr["concepts"]) & truth)} for tr in brain.last_candidates[:CANDIDATES]]
@@ -245,9 +251,12 @@ def make_report(results, train, test, seconds, args):
     idle = [x for x in results if not x["scores"] and not x["first"]]
     idle_len = sum(x["text_len"] for x in idle) / max(len(idle), 1)
     idle_empty = sum(x["text_len"] == 0 for x in idle) / max(len(idle), 1)
+    part = lambda k: sum(x["text_parts"][k] for x in results) / max(len(results), 1)
+    parts = "、".join(f"{name} {part(k):.0f}" for k, name in
+                     zip(SECTIONS, ["やること", "直前の作業", "出来事", "場所", "語"]))
     lines += ["", f"記憶モデルが実際に差し込む内容(確かさで絞ったやり取り+語・場所+直前の作業)の再現率は "
               f"{shown_rec:.1%}。差し込む文章の中に、実際に使われた情報がそのまま書かれている割合は {text_rec:.1%}。"
-              f"差し込む文章の長さは平均 {avg_len:.0f}文字。",
+              f"差し込む文章の長さは平均 {avg_len:.0f}文字(部分ごとの平均: {parts}。それぞれ単独で出したときの長さ)。",
               f"過去の記憶が要らなかったやり取り(会話の途中、{len(idle)}件)では、平均 {idle_len:.0f}文字を差し込み、"
               f"{idle_empty:.0%}で何も差し込まなかった。", ""]
 

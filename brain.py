@@ -56,12 +56,11 @@ CHOICE_T = 0.03              # 場所の選択規則の温度(ACT-R の t)。小
 SHOW_CONF = 0.4              # この確かさ以上のものだけ差し込む(確かさ = 実際に関係している確率の目安)
 PLACE_SHOW_CONF = 0.2
 EPISODES_SHOWN = 5
-SUPERSEDE_PENALTY = 0.0      # 同じ件のより新しい出来事があるとき、古い出来事の活性から引く量(0 なら干渉なし)
-SUPERSEDE_OVERLAP = 3        # 何個の概念(場所を除く)が重なれば同じ件とみなすか
-SUPERSEDE_POOL = 30          # 干渉を考える、候補の上位の数
-ABSTAIN = False              # 確かな出来事を1つも思い出せないとき(会話の最初を除く)、語や場所も差し込まない
+ABSTAIN = False              # 確かな出来事を1つも思い出せないとき(会話の最初を除く)、語や場所も差し込まない。
+                             # SHOW_CONF を上げて差し込みを短くするときに合わせて使う(0.5 と組み合わせると、記憶が要らないやり取りの半分で何も入れない)
 CANDIDATES_KEPT = 50        # 評価用に残す、並べた出来事の上位の数(候補の段階での取りこぼしを測る)
-EP_W_KEYWORD = 0.5           # 出来事の記録に、依頼の語が文字どおり含まれるかの重み
+EP_W_PLACE = 0.5             # 出来事が、今の作業フォルダ(またはそれを含むプロジェクト)で起きたかの重み
+EP_W_KEYWORD = 0.5          # 出来事の記録に、依頼の語が文字どおり含まれるかの重み
 KEYWORD_TERMS = 12           # キーワード検索に使う、依頼の語の数
 EP_W_DETAIL = 1.0            # 出来事の記録の中に、依頼とよく合う部分があるかの重み
 CHUNK_SIM_MIN = 0.45         # 記録の部分(チャンク)と依頼の類似度がこれ以下なら、関係なしとみなす
@@ -69,7 +68,6 @@ CHUNK_SIM_FULL = 0.70        # 類似度がこれ以上なら、十分に関係�
 DETAILS_SHOWN = 3            # 思い出した出来事ごとに、差し込む部分の数
 PROMPT_HINT_CHARS = 60       # 差し込む文章に載せる、依頼の長さ
 DETAIL_HINT_CHARS = 120      # 差し込む文章に載せる、関係する部分の長さ
-FIRST_DETAIL_CHARS = 120     # いちばん確かな記憶について載せる、関係する部分の長さ
 HINTS_SHOWN = 6              # 思い出した出来事ごとに載せる、手がかりの語の数
 # 展望記憶(これからやること)
 DONE_OVERLAP = 3             # 後のやり取りと、何個の概念が重なれば同じ件とみなすか(完了の判定)
@@ -208,14 +206,14 @@ def recollection_text(r):
         lines += [f"- {head(e)}" for e in r["recent"]]
     if r["episodes"]:
         lines.append("関係しそうな記憶(確かさ順):")
-        for i, e in enumerate(r["episodes"]):
+        for e in r["episodes"]:
             lines.append(f"- {head(e)} 確かさ{e['conf']:.2f}")
             hints = []
             if e["hints"]:
                 hints.append("手がかり: " + ", ".join(e["hints"]))
-            if e["details"]:  # そのやり取りの中で、今の依頼と最も関係する部分(いちばん確かな記憶は詳しめに)
+            if e["details"]:  # そのやり取りの中で、今の依頼と最も関係する部分
                 d = e["details"][0]
-                hints.append(f"{d['kind']}「{clip(d['text'], FIRST_DETAIL_CHARS if i == 0 else DETAIL_HINT_CHARS)}」")
+                hints.append(f"{d['kind']}「{clip(d['text'], DETAIL_HINT_CHARS)}」")
             if hints:
                 lines.append("  " + " / ".join(hints))
     if r["places"]:
@@ -238,6 +236,11 @@ def is_inside(inner, outer):
     """inner が outer の中のフォルダか"""
     i, o = inner.lower().rstrip("\\/"), outer.lower().rstrip("\\/")
     return i != o and (i.startswith(o + "\\") or i.startswith(o + "/"))
+
+
+def at_place(cwd, place):
+    """今の作業フォルダが、その場所そのものか、その中か(その場所で作業している)"""
+    return cwd.lower().rstrip("\\/") == place.lower().rstrip("\\/") or is_inside(cwd, place)
 
 
 def link_key(a, b):
@@ -611,7 +614,7 @@ class Brain:
 
     # ---- 関連することを思い出す(依頼に差し込む記憶) ----
 
-    def recollect(self, text, use_context=True, reinforce=True, session=None):
+    def recollect(self, text, use_context=True, reinforce=True, session=None, cwd=None):
         """依頼に関連することを思い出す
 
         記憶力の良い人が、依頼を聞いて関連することを思い出すのと同じように、
@@ -621,13 +624,15 @@ class Brain:
           直近   : 新しい会話の最初なら、直前に何をしていたか
         を思い出し、それぞれに確かさ(ACT-R の検索確率)を付ける。text は差し込み用の文章。
         session: 今の会話の識別子。今の会話のやり取りは相手(Claude)がすでに覚えているので、思い出す対象から外す
+        cwd    : 今の作業フォルダ。人が「今いる場所」で、その場所の出来事を思い出しやすくなる(文脈依存記憶)のと同じく、
+                 同じ場所での出来事を思い出しやすくする
         """
         new_conversation = not self.context
         cues, _, answer = self.recall(text, use_context, reinforce=False)
         act = self.last_activation
         cue_set = set(cues)
 
-        episodes = self.rank_episodes(act, text, exclude_session=session)
+        episodes = self.rank_episodes(act, text, exclude_session=session, cwd=cwd)
         concepts = [{"name": n, "conf": retrieval_probability(a, RETRIEVAL_TAU, RETRIEVAL_S)}
                     for n, a in sorted(act.items(), key=lambda x: -x[1])
                     if not is_place(n) and n not in cue_set and a >= RECALL_THRESHOLD][:CONCEPTS_SHOWN]
@@ -669,7 +674,7 @@ class Brain:
             e.pop("trace", None)
         return result
 
-    def rank_episodes(self, act, text, exclude_session=None):
+    def rank_episodes(self, act, text, exclude_session=None, cwd=None):
         """出来事(エピソード記憶の痕跡)を、ACT-R の活性 A = 基本活性化 + 拡散活性化 で並べる
 
           要旨   : 依頼と出来事の要旨の意味の近さ(他の出来事と比べてどれだけ際立つか)
@@ -695,16 +700,15 @@ class Brain:
             parts = [d for d in details.get(tr.get("ref"), []) if d[0] >= CHUNK_SIM_MIN]
             detail = max(0.0, (parts[0][0] - CHUNK_SIM_MIN) / (CHUNK_SIM_FULL - CHUNK_SIM_MIN)) if parts else 0.0
             on = lambda name: 0.0 if name in ABLATE else 1.0
+            here = 1.0 if cwd and any(is_place(c) and at_place(cwd, c) for c in tr["concepts"]) else 0.0
             a = (on("gist") * EP_W_GIST * gist + on("concept") * EP_W_CONCEPT * cs / top_c
                  + on("recency") * EP_W_BASE * base + on("detail") * EP_W_DETAIL * detail
-                 + EP_W_KEYWORD * keyword.get(tr.get("ref"), 0.0) / top_k)
+                 + EP_W_KEYWORD * keyword.get(tr.get("ref"), 0.0) / top_k + EP_W_PLACE * here)
             ranked.append((a, tr, parts))
             features[id(tr)] = {"gist": gist, "concept": cs / top_c, "base": base, "detail": detail,
-                                "keyword": keyword.get(tr.get("ref"), 0.0) / top_k}
+                                "keyword": keyword.get(tr.get("ref"), 0.0) / top_k, "place": here}
         ranked.sort(key=lambda x: -x[0])
         self.last_features = features   # 評価用: 並べ方の重みをデータから推定するため
-        if SUPERSEDE_PENALTY:
-            ranked = self.interfere(ranked)
         self.last_candidates = [tr for _, tr, _ in ranked[:CANDIDATES_KEPT]]   # 評価用: 候補の段階で何が拾えていたか
         out = []
         for a, tr, parts in ranked[:EPISODES_SHOWN * 4]:
@@ -717,23 +721,6 @@ class Brain:
                                    key=lambda c: -act[c])[:HINTS_SHOWN]
             out.append(view)
         return out
-
-    @staticmethod
-    def interfere(ranked):
-        """新しい出来事が、同じ件の古い出来事を思い出しにくくする(逆向干渉)
-
-        主人公を「セナ」から「カイ」に変えたように、同じ件(概念が重なる)について後から別の出来事があると、
-        古い方は今の状態ではなくなっている。候補の上位の中で、同じ件のより新しい出来事があれば、古い方の活性を下げる。
-        """
-        pool = ranked[:SUPERSEDE_POOL]
-        topics = [{c for c in tr["concepts"] if not is_place(c)} for _, tr, _ in pool]
-        out = []
-        for i, (a, tr, parts) in enumerate(pool):
-            newer = any(pool[j][1]["t"] > tr["t"] and len(topics[i] & topics[j]) >= SUPERSEDE_OVERLAP
-                        for j in range(len(pool)) if j != i)
-            out.append((a - SUPERSEDE_PENALTY if newer else a, tr, parts))
-        out.sort(key=lambda x: -x[0])
-        return out + ranked[SUPERSEDE_POOL:]
 
     def query_terms(self, text):
         """キーワード検索に使う語: 依頼の名詞、英数字の語(型番・ファイル名など)、名前が一致した概念"""

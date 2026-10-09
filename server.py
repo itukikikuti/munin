@@ -97,7 +97,7 @@ def _handle(path, body):
         text = body.get("text", "").strip()
         if not text:
             return 400, {"error": "指示を入力してください"}
-        r = b.recollect(text)
+        r = b.recollect(text, cwd=body.get("cwd") or None)   # 作業フォルダ(あれば、その場所の出来事を思い出しやすくする)
         r.pop("ranked", None)
         result = {"recall": {**r, "query": text, "cue_strength": b.last_cues,
                              "embedding": bool(b.embedder and b.embedder.available)}}
