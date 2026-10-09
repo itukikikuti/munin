@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
@@ -135,8 +136,58 @@ def places_of(cwd, edited, read):
     return places
 
 
+def clean_prompt(text):
+    """ユーザーの発言から、システムが差し込んだ部分を除く(何も残らなければ空)
+
+    完了通知・コマンドの出力・システムからの注意書きは、ユーザーの言葉ではないので捨てる。
+    貼り付けた文章(<pasted_content>)などのタグは外して中身を残す。
+    コマンド(/goal など)は、引数があるときだけ「/名前 引数」として残す(引数のない /compact などは指示の中身がない)。
+    """
+    s = text.strip()
+    if s.startswith(SYSTEM_TAGS):
+        return ""
+    m = re.search(r"<command-name>\s*(.*?)\s*</command-name>", s, re.S)
+    if m:
+        args = re.search(r"<command-args>(.*?)</command-args>", s, re.S)
+        args = args.group(1).strip() if args else ""
+        return f"{m.group(1)} {args}" if args else ""
+    s = WRAPPER_TAGS.sub("", s)   # 包んでいるタグだけ外す(依頼に書いた HTML などはそのまま)
+    return s.strip()
+
+
+WRAPPER_TAGS = re.compile(r"</?(?:pasted_content|artifact-[\w-]+)(?:\s[^<>]*)?>")
+
+
+SYSTEM_TAGS = ("<task-notification", "<local-command-stdout", "<local-command-stderr", "<local-command-caveat",
+               "<system-reminder", "<bash-stdout", "<bash-stderr", "<command-message",
+               "<agent-message", "<cross-session-message")   # サブエージェントや別の会話からの連絡
+INTERRUPTED = "[Request interrupted"
+USER_SAID = re.compile(r"the user said:\s*(.+)", re.S)                # ツールの実行を断ったときの、ユーザーの言葉
+ANSWERS = re.compile(r'"((?:[^"\\]|\\.)*)"="((?:[^"\\]|\\.)*)"')      # 質問への答え("質問"="答え")
+
+
+def user_words_in_result(result):
+    """ツールの結果の中にある、ユーザー自身の言葉(質問への答え、実行を断ったときの指示)"""
+    if "answered" in result[:200]:
+        return "\n".join(f"「{q}」→ {a}" for q, a in ANSWERS.findall(result))
+    m = USER_SAID.search(result)
+    return m.group(1).strip() if m else ""
+
+
+def new_turn(t, cwd, text, session, uid, source="claude"):
+    return {"t": t, "cwd": cwd, "user": text, "session": session, "uuid": uid, "source": source,
+            "reply": [], "said": [], "edited": [], "read": [], "steps": [], "pending": {}}
+
+
 def read_turns(limit=None):
-    """セッションを新しい順に読み、ユーザー指示ごとの出来事にまとめる"""
+    """セッションを新しい順に読み、ユーザー指示ごとの出来事にまとめる
+
+    ユーザーの言葉は、普通の発言のほかに、次の形でも残っている。どれも本人の判断や好みなので拾う。
+      作業中に送った発言 : 発言ではなく、添付(queued_command)として記録される → 新しい指示として扱う
+      質問への答え       : ツール(AskUserQuestion)の結果として記録される → その出来事の中のユーザーの言葉
+      実行を断ったときの指示 : ツールの結果(「the user said: …」)
+      途中で止めたこと   : 「[Request interrupted …」 → その方向が違ったという合図として残す
+    """
     turns = []
     seen = set()  # セッションを再開・分岐すると履歴がコピーされるので、同じ発言は1回だけ数える
     files = sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")), key=os.path.getmtime, reverse=True)
@@ -145,6 +196,7 @@ def read_turns(limit=None):
             break  # 必要な件数が十分に集まった(並べ替えたあと新しい順に limit 件使う)
         print(f"\r  読み込み {i + 1}/{len(files)}", end="", file=sys.stderr, flush=True)
         cur = None
+        queued = set()   # この会話で、作業中に送られた発言(あとで普通の発言としても記録されることがある)
         with open(path, encoding="utf-8") as f:
             for line in f:
                 try:
@@ -154,29 +206,56 @@ def read_turns(limit=None):
                 if d.get("isSidechain") or d.get("isMeta") or d.get("isCompactSummary"):
                     continue
                 msg = d.get("message") or {}
+                if d.get("type") == "attachment":
+                    a = d.get("attachment") or {}
+                    if a.get("type") != "queued_command" or a.get("commandMode") != "prompt":
+                        continue
+                    text = clean_prompt(text_of(a.get("prompt")))
+                    key = d.get("uuid") or (a.get("timestamp"), text)
+                    if not text or key in seen or text in queued:
+                        continue
+                    seen.add(key)
+                    queued.add(text)
+                    cur = new_turn(a.get("timestamp") or d.get("timestamp"), d.get("cwd"), text, path, d.get("uuid"))
+                    turns.append(cur)
+                    continue
                 if d.get("type") == "user" and cur is not None and isinstance(msg.get("content"), list):
                     for c in msg["content"]:  # ツールの結果を、そのツールの実行に結びつける
                         if c.get("type") == "tool_result" and c.get("tool_use_id") in cur["pending"]:
                             step = cur["pending"].pop(c["tool_use_id"])
-                            step["result"] = text_of(c.get("content"))[:RESULT_CHARS]
+                            result = text_of(c.get("content"))
+                            step["result"] = result[:RESULT_CHARS]
                             step["error"] = bool(c.get("is_error"))
+                            said = user_words_in_result(result)
+                            if said:
+                                step["said"] = said
+                                cur["said"].append(said)
                 if d.get("type") == "user":
-                    text = text_of(msg.get("content"))
-                    if not text.strip() or text.lstrip().startswith(("<", "[Request interrupted")):
-                        continue  # ツールの結果・コマンド出力・中断の記録は指示ではない
+                    raw = text_of(msg.get("content"))
+                    if raw.lstrip().startswith(INTERRUPTED):
+                        if cur is not None:   # ユーザーが途中で止めた
+                            cur["steps"].append({"kind": "interrupt"})
+                        continue
+                    text = clean_prompt(raw)
+                    if not text:
+                        continue  # ツールの結果・コマンド出力・システムの通知は指示ではない
                     key = d.get("uuid") or (d.get("timestamp"), text)
                     if key in seen:
                         cur = None  # 続く Claude の作業も、すでに数えた分
                         continue
                     seen.add(key)
-                    cur = {"t": d.get("timestamp"), "cwd": d.get("cwd"), "user": text, "session": path,
-                           "uuid": d.get("uuid"), "reply": [], "edited": [], "read": [], "steps": [], "pending": {}}
+                    if text in queued:
+                        continue  # 作業中に送った発言が、あとで普通の発言としても記録されたもの(すでに数えた)
+                    cur = new_turn(d.get("timestamp"), d.get("cwd"), text, path, d.get("uuid"))
                     turns.append(cur)
                 elif d.get("type") == "assistant" and cur is not None:
                     for b in msg.get("content") or []:
                         if b.get("type") == "text" and b.get("text", "").strip():
                             cur["reply"].append(b["text"])
                             cur["steps"].append({"kind": "text", "text": b["text"]})
+                        elif b.get("type") == "thinking" and b.get("thinking", "").strip():
+                            # 考えた過程(なぜそうしたか)。記録には残すが、量が多いので検索の対象にはしない
+                            cur["steps"].append({"kind": "thinking", "text": b["thinking"][:THINKING_CHARS]})
                         elif b.get("type") == "tool_use":
                             inp = b.get("input") or {}
                             step = {"kind": "tool", "name": b.get("name"), "summary": tool_summary(b.get("name"), inp)}
@@ -190,9 +269,94 @@ def read_turns(limit=None):
                             if kind and fp not in cur[kind]:
                                 cur[kind].append(fp)
     print(file=sys.stderr)
+    turns += read_codex_turns()
     for t in turns:
         t.pop("pending", None)
     return [t for t in turns if t["t"]]
+
+
+THINKING_CHARS = 4000
+
+
+def read_codex_turns():
+    """Codex のセッション記録(~/.codex/sessions)を、Claude Code と同じ形の出来事にする
+
+    完了した項目(item_completed)を正にする。承認の審査役やレビュー役のような、
+    Codex が自分で立ち上げた会話(サブエージェント)は、ユーザーとのやり取りではないので除く。
+    """
+    turns = []
+    files = sorted(glob.glob(os.path.join(CODEX_SESSIONS, "**", "*.jsonl"), recursive=True))
+    for path in files:
+        cur, sid, cwd, skip = None, os.path.basename(path), None, False
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                p = d.get("payload") or {}
+                if d.get("type") == "session_meta":
+                    sid, cwd = p.get("id") or sid, p.get("cwd")
+                    skip = isinstance(p.get("source"), dict) or p.get("thread_source") not in (None, "user")
+                    if skip:
+                        break
+                    continue
+                if d.get("type") == "turn_context":
+                    cwd = p.get("cwd") or cwd
+                    continue
+                if d.get("type") != "event_msg" or p.get("type") != "item_completed":
+                    continue
+                it = p.get("item") or {}
+                kind = it.get("type")
+                if kind == "UserMessage":
+                    text = clean_prompt("\n".join(c.get("text", "") for c in it.get("content") or []))
+                    if not text or text.startswith(CODEX_AGENT_HISTORY):
+                        if text.startswith(CODEX_AGENT_HISTORY):
+                            break   # 古い版の審査役の会話
+                        continue
+                    # 古い版は項目の id が会話の中でしか一意でないので、会話の id と合わせて鍵にする
+                    uid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex:{sid}:{it.get('id')}"))
+                    cur = new_turn(d.get("timestamp"), cwd, text, path, uid, source="codex")
+                    turns.append(cur)
+                elif cur is None:
+                    continue
+                elif kind == "AgentMessage":
+                    text = "\n".join(c.get("text", "") for c in it.get("content") or []).strip()
+                    if text:
+                        cur["reply"].append(text)
+                        cur["steps"].append({"kind": "text", "text": text})
+                elif kind == "Plan" and it.get("text"):
+                    cur["steps"].append({"kind": "text", "text": it["text"]})
+                elif kind == "Reasoning":
+                    text = "\n".join(it.get("summary_text") or [])
+                    if text.strip():
+                        cur["steps"].append({"kind": "thinking", "text": text[:THINKING_CHARS]})
+                elif kind == "CommandExecution":
+                    cmd = it.get("command")
+                    cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd or "")
+                    cur["steps"].append({"kind": "tool", "name": "Bash", "summary": tool_summary("Bash", {"command": cmd}),
+                                         "result": str(it.get("aggregated_output") or "")[:RESULT_CHARS],
+                                         "error": it.get("exit_code") not in (0, None)})
+                    for pc in it.get("parsed_cmd") or []:
+                        if pc.get("type") == "read" and pc.get("path") and pc["path"] not in cur["read"]:
+                            cur["read"].append(pc["path"])
+                elif kind == "FileChange":
+                    for fp in (it.get("changes") or {}):
+                        cur["steps"].append({"kind": "tool", "name": "Edit", "summary": tool_summary("Edit", {"file_path": fp})})
+                        if fp not in cur["edited"]:
+                            cur["edited"].append(fp)
+                elif kind == "WebSearch":
+                    cur["steps"].append({"kind": "tool", "name": "WebSearch",
+                                         "summary": tool_summary("WebSearch", {"query": it.get("query") or ""})})
+                elif kind == "McpToolCall":
+                    cur["steps"].append({"kind": "tool", "name": f"{it.get('server')}.{it.get('tool')}",
+                                         "summary": tool_summary(f"{it.get('server')}.{it.get('tool')}", it.get("arguments") or {}),
+                                         "result": json.dumps(it.get("result"), ensure_ascii=False)[:RESULT_CHARS]})
+    return turns
+
+
+CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
+CODEX_AGENT_HISTORY = "The following is the Codex agent history"
 
 
 def unify_case(turns):
@@ -258,7 +422,7 @@ class Vocabulary:
 def analyze(t):
     """やり取りから名詞を取り出しておく"""
     if "user_terms" not in t:
-        t["user_terms"] = nouns(t["user"])
+        t["user_terms"] = nouns("\n".join([t["user"]] + t.get("said", [])))   # 質問への答えなども本人の言葉
         t["reply_terms"] = nouns("\n".join(t["reply"]))
 
 
@@ -352,9 +516,41 @@ def parse_time(t):
     return datetime.fromisoformat(t["t"].replace("Z", "+00:00")).astimezone(JST)
 
 
-def load_turns(limit=None):
-    """セッションを読み、時刻順に並べる(limit があれば最近の limit 件)"""
+def turn_from_record(key, rec):
+    """保存してある記録から、出来事を作り直す(元のセッション記録が消えたとき用)"""
+    steps = rec["steps"]
+    files = lambda prefix: list(dict.fromkeys(s["summary"][len(prefix):] for s in steps
+                                              if s["kind"] == "tool" and s["summary"].startswith(prefix)))
+    src = rec.get("src") or {}
+    return {"t": rec["time"], "cwd": rec.get("cwd"), "user": rec["prompt"], "session": src.get("file") or key,
+            "uuid": key, "source": src.get("app", "claude"),
+            "reply": [s["text"] for s in steps if s["kind"] == "text"],
+            "said": [s["said"] for s in steps if s.get("said")],
+            "edited": files("編集: ") + files("作成: "), "read": files("読み込み: "), "steps": steps}
+
+
+def load_turns(limit=None, store=None):
+    """セッションを読み、時刻順に並べる(limit があれば最近の limit 件)
+
+    store があれば、元のセッション記録がもう残っていないやり取りを、保存してある記録から補う
+    (Claude Code は古いセッション記録を自動で消すので、記憶の原本は store に持つ)。
+    """
     turns = read_turns(limit)
+    if store is not None and not limit:
+        have = {record_key(t) for t in turns}
+        lost = []
+        for k in store.keys():
+            if k in have:
+                continue
+            rec = store.record(k)
+            if os.path.exists((rec.get("src") or {}).get("file") or ""):
+                store.delete(k)   # 元の記録は残っているのに出来事にならなかった(取り込み方を変えて除いたもの)
+            else:
+                lost.append(turn_from_record(k, rec))
+        store.commit()
+        if lost:
+            print(f"  元の記録が消えていたやり取り {len(lost)}件を、保存してある記録から補いました", file=sys.stderr)
+        turns += lost
     turns.sort(key=lambda t: t["t"])
     if limit:
         turns = turns[-limit:]
@@ -366,12 +562,11 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
     t0 = time.time()
-    turns = load_turns(limit)
-    print(f"出来事 {len(turns)}件 ({turns[0]['t'][:10]} 〜 {turns[-1]['t'][:10]})")
-
     if os.path.exists(STATE):
         os.remove(STATE)
     brain = Brain(STATE)
+    turns = load_turns(limit, store=brain.store)
+    print(f"出来事 {len(turns)}件 ({turns[0]['t'][:10]} 〜 {turns[-1]['t'][:10]})")
     if brain.embedder:  # 出来事の要旨のベクトルを、先にまとめて計算しておく
         brain.embedder.ensure_gists([t["user"] for t in turns], progress=True)
     if brain.store:     # やり取りの記録(全文)と、細かい単位の検索用のベクトル

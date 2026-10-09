@@ -24,8 +24,15 @@ def render(record, full=False):
     for step in record["steps"]:
         if step["kind"] == "text":
             lines += ["", "### 返答", cut(step["text"])]
+        elif step["kind"] == "thinking":
+            if full:   # 考えた過程は長いので、--full のときだけ
+                lines += ["", "### 考えたこと", step["text"]]
+        elif step["kind"] == "interrupt":
+            lines += ["", "### (ユーザーがここで止めた)"]
         else:
             lines += ["", f"### {step['summary']}"]
+            if step.get("said"):
+                lines.append(f"ユーザーの言葉: {cut(step['said'])}")
             if step.get("result"):
                 lines.append(("(エラー) " if step.get("error") else "") + cut(step["result"]))
     return "\n".join(lines)

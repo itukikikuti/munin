@@ -67,6 +67,8 @@ def make_chunks(record):
         if step["kind"] == "text":
             chunks += [("返答", p) for p in split_text(step["text"])]
         elif step["kind"] == "tool":
+            if step.get("said"):   # 質問への答えや、実行を断ったときの指示(ユーザー自身の言葉)
+                chunks += [("ユーザー", p) for p in split_text(step["said"])]
             chunks.append(("操作", step["summary"]))
             if step.get("error") and step.get("result"):
                 chunks.append(("エラー", f"{step['summary']}\n{step['result'][:PARA_MAX]}"))
@@ -87,10 +89,15 @@ class Store:
     # ---- 保存 ----
 
     def put(self, key, record):
-        """記録を保存し、チャンクに分ける(同じ鍵の記録がすでにあれば何もしない)"""
-        if self.db.execute("SELECT 1 FROM records WHERE key=?", (key,)).fetchone():
+        """記録を保存し、チャンクに分ける(同じ鍵で中身も同じ記録がすでにあれば何もしない。
+        取り込み方を変えて中身が変わったときは、置き換える)"""
+        data = json.dumps(record, ensure_ascii=False)
+        row = self.db.execute("SELECT data FROM records WHERE key=?", (key,)).fetchone()
+        if row and row[0] == data:
             return
-        self.db.execute("INSERT INTO records VALUES (?, ?)", (key, json.dumps(record, ensure_ascii=False)))
+        if row:
+            self.db.execute("DELETE FROM chunks WHERE key=?", (key,))
+        self.db.execute("INSERT OR REPLACE INTO records VALUES (?, ?)", (key, data))
         self.db.executemany("INSERT INTO chunks (key, kind, text) VALUES (?, ?, ?)",
                             [(key, k, t) for k, t in make_chunks(record)])
         self._index = None
@@ -102,6 +109,14 @@ class Store:
         """鍵の先頭部分から記録の鍵を探す(1件に決まらなければ None)"""
         rows = self.db.execute("SELECT key FROM records WHERE key LIKE ? LIMIT 2", (short + "%",)).fetchall()
         return rows[0][0] if len(rows) == 1 else None
+
+    def delete(self, key):
+        self.db.execute("DELETE FROM chunks WHERE key=?", (key,))
+        self.db.execute("DELETE FROM records WHERE key=?", (key,))
+        self._index = None
+
+    def keys(self):
+        return [k for (k,) in self.db.execute("SELECT key FROM records")]
 
     def record(self, key):
         row = self.db.execute("SELECT data FROM records WHERE key=?", (key,)).fetchone()
@@ -129,9 +144,10 @@ class Store:
         """キーワード検索の索引(SQLite の全文検索 FTS5、trigram 方式)を、チャンクに合わせて作る"""
         self.db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', "
                         "content_rowid='id', tokenize='trigram')")
-        n_fts = self.db.execute("SELECT count(*) FROM chunks_fts").fetchone()[0]
-        n = self.db.execute("SELECT count(*) FROM chunks").fetchone()[0]
-        if n_fts != n:
+        # 索引に入っている文の数と最後の id(外部の表を中身にしているので、索引そのものの表で数える)
+        n_fts, last_fts = self.db.execute("SELECT count(*), max(id) FROM chunks_fts_docsize").fetchone()
+        n, last = self.db.execute("SELECT count(*), max(id) FROM chunks").fetchone()
+        if (n_fts, last_fts) != (n, last):   # 増えた・置き換わった(置き換えると id が新しくなる)
             self.db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
             self.db.commit()
         self._chunk_count = n
@@ -201,7 +217,7 @@ KEYWORD_MAX_HITS = 2000  # キーワード検索で、これ以上のチャン�
 def build_record(t):
     """読み込んだやり取りから、保存する記録を作る"""
     return {"prompt": t["user"], "steps": t["steps"], "time": t["t"], "cwd": t["cwd"],
-            "src": {"file": t["session"], "uuid": t.get("uuid")}}
+            "src": {"file": t["session"], "uuid": t.get("uuid"), "app": t.get("source", "claude")}}
 
 
 if __name__ == "__main__":
