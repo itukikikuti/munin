@@ -64,7 +64,7 @@ claude plugin install munin@munin
 | Claude が必要なとき | 道具 `recall`(言葉で探し直す)と `recall_detail`(鍵から記録を開く)を使う |
 
 - すべてこの PC の中で動き、会話の内容を外へ送らない。記憶のデータは `~/.munin` に置く(`MUNIN_HOME` で変えられる)
-- 差し込むたびに、何を出したかを `~/.munin/logs/recall_log.jsonl` に記録する
+- 差し込むたびに、何を出したかを `~/.munin/logs/recall_log.jsonl` に記録する。`node src/cli.ts usage` は、`~/.munin/config.json` の `trial_start`(使い始めた日時)以降を集計する
 - 記憶を画面で見るには、常駐サーバーが動いている間に http://127.0.0.1:8770 を開く(ネットワーク図つき)
 
 ## コマンド

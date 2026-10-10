@@ -1,6 +1,6 @@
 // Claude Code で使ったときの記録(logs/recall_log.jsonl)から、差し込んだ記憶が実際に使われたかを調べる
 //
-//   node src/cli.ts usage                     全期間
+//   node src/cli.ts usage                     使い始めた日時(config.json の trial_start)以降
 //   node src/cli.ts usage --since 2026-10-15
 //
 // フックは、メッセージごとに「何を思い出して差し込んだか」を記録している。
@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { Brain, isPlace } from './brain.ts';
-import { LOG_DIR, STATE } from './config.ts';
+import { config, LOG_DIR, STATE } from './config.ts';
 
 const BINS: [number, number][] = [[0, 0.5], [0.5, 0.7], [0.7, 0.9], [0.9, 1.01]];
 
@@ -47,7 +47,7 @@ async function afterPrompt(transcript: string | undefined, prompt: string): Prom
 
 export async function usage(argv: string[]): Promise<void> {
   const si = argv.indexOf('--since');
-  const since = si >= 0 ? argv[si + 1] : '';
+  const since = si >= 0 ? argv[si + 1] : config().trial_start ?? '';
   const file = path.join(LOG_DIR, 'recall_log.jsonl');
   if (!fs.existsSync(file)) {
     console.log('まだ記録がありません');
@@ -84,6 +84,7 @@ export async function usage(argv: string[]): Promise<void> {
   }
   const n = Math.max(entries.length, 1);
   const ms = entries.map((e) => e.ms);
+  if (since) console.log(`${since} 以降の記録`);
   console.log(`差し込んだ回数 ${entries.length}回 / セッション記録と突き合わせられたもの ${checked}回`);
   console.log(`差し込みの長さ 平均${(entries.reduce((s, e) => s + e.text.length, 0) / n).toFixed(0)}文字 / 何も差し込まなかった ${entries.filter((e) => !e.text).length}回`);
   console.log(`所要時間(サーバー側) 平均${(ms.reduce((s, x) => s + x, 0) / n).toFixed(0)}ms / 最大${Math.max(0, ...ms)}ms`);

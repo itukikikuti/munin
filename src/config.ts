@@ -32,6 +32,8 @@ export const PORT = Number(process.env.PORT || 8770);
 export interface Config {
   /** 概念と依頼の意味に使うモデル(GPU がなければ軽い 0.6b にできる) */
   embed_model?: string;
+  /** 実際に使い始めた日時。分析(usage)は、指定がなければこれ以降の記録を集計する */
+  trial_start?: string;
 }
 
 export function config(): Config {
