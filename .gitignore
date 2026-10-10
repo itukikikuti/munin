@@ -1,5 +1,6 @@
 # 記憶の状態(取り込みスクリプトで作り直せる)
 brain_state.json
+life_state.json
 layout.json
 eval/
 

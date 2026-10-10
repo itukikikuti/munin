@@ -28,6 +28,7 @@ from store import RESULT_CHARS, Store, build_record, tool_summary
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
+LIFE = os.path.join(os.path.dirname(STATE), "life_state.json")   # 続きから覚えるための、体験の途中の状態
 PROJECTS = os.path.expanduser("~/.claude/projects")
 HOME = os.path.expanduser("~")
 JST = timezone(timedelta(hours=9))
@@ -179,7 +180,7 @@ def new_turn(t, cwd, text, session, uid, source="claude"):
             "reply": [], "said": [], "edited": [], "read": [], "steps": [], "pending": {}}
 
 
-def read_turns(limit=None):
+def read_turns(limit=None, files=None, codex_files=None):
     """セッションを新しい順に読み、ユーザー指示ごとの出来事にまとめる
 
     ユーザーの言葉は、普通の発言のほかに、次の形でも残っている。どれも本人の判断や好みなので拾う。
@@ -190,7 +191,8 @@ def read_turns(limit=None):
     """
     turns = []
     seen = set()  # セッションを再開・分岐すると履歴がコピーされるので、同じ発言は1回だけ数える
-    files = sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")), key=os.path.getmtime, reverse=True)
+    if files is None:
+        files = sorted(claude_files(), key=os.path.getmtime, reverse=True)
     for i, path in enumerate(files):
         if limit and len(turns) >= limit * 2:
             break  # 必要な件数が十分に集まった(並べ替えたあと新しい順に limit 件使う)
@@ -269,7 +271,7 @@ def read_turns(limit=None):
                             if kind and fp not in cur[kind]:
                                 cur[kind].append(fp)
     print(file=sys.stderr)
-    turns += read_codex_turns()
+    turns += read_codex_turns(codex_files)
     for t in turns:
         t.pop("pending", None)
     return [t for t in turns if t["t"]]
@@ -278,14 +280,14 @@ def read_turns(limit=None):
 THINKING_CHARS = 4000
 
 
-def read_codex_turns():
+def read_codex_turns(files=None):
     """Codex のセッション記録(~/.codex/sessions)を、Claude Code と同じ形の出来事にする
 
     完了した項目(item_completed)を正にする。承認の審査役やレビュー役のような、
     Codex が自分で立ち上げた会話(サブエージェント)は、ユーザーとのやり取りではないので除く。
     """
     turns = []
-    files = sorted(glob.glob(os.path.join(CODEX_SESSIONS, "**", "*.jsonl"), recursive=True))
+    files = sorted(codex_files()) if files is None else files
     for path in files:
         cur, sid, cwd, skip = None, os.path.basename(path), None, False
         with open(path, encoding="utf-8") as f:
@@ -356,6 +358,14 @@ def read_codex_turns():
 
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
+
+
+def claude_files():
+    return glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
+
+
+def codex_files():
+    return glob.glob(os.path.join(CODEX_SESSIONS, "**", "*.jsonl"), recursive=True)
 CODEX_AGENT_HISTORY = "The following is the Codex agent history"
 
 
@@ -438,6 +448,37 @@ class Life:
         self.nights = 0
         self.learned = 0
         self.session = None
+        self.scanned = {}   # セッション記録のファイル -> 最後に読み切ったときの更新時刻
+
+    def save(self, path):
+        """続きから体験できるように、語の数え方・暦・最後に読んだファイルの状態を保存する"""
+        v = self.vocab
+        data = {"turns": v.turns, "df": v.df, "sdf": v.sdf,
+                "session_terms": {s: sorted(ts) for s, ts in v.session_terms.items()},
+                "origin": self.origin.isoformat(), "day": self.day.isoformat(), "nights": self.nights,
+                "learned": self.learned, "session": self.session, "scanned": self.scanned}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def restore(cls, brain, path):
+        """保存した状態から続きを体験する(なければ None)"""
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        life = cls.__new__(cls)
+        life.brain = brain
+        life.vocab = Vocabulary()
+        life.vocab.turns = data["turns"]
+        life.vocab.df = Counter(data["df"])
+        life.vocab.sdf = Counter(data["sdf"])
+        life.vocab.session_terms = {s: set(ts) for s, ts in data["session_terms"].items()}
+        life.origin = datetime.fromisoformat(data["origin"])
+        life.day = datetime.fromisoformat(data["day"]).date()
+        life.nights, life.learned, life.session = data["nights"], data["learned"], data["session"]
+        life.scanned = data.get("scanned", {})
+        return life
 
     def hours(self, dt):
         return (dt - self.origin).total_seconds() / 3600
@@ -512,6 +553,46 @@ def store_records(store, turns):
     return store.ensure_vectors(progress=True)
 
 
+def learn_new(life, files=(), codex=(), settle=False):
+    """セッション記録の新しいやり取りだけを、続きとして体験させる(使いながら覚える)
+
+    files / codex: 読み直す Claude Code / Codex のセッション記録のファイル。
+    すでに記録してあるやり取りは覚え直さない(記録の中身は、続きが書き足されていれば新しくする)。
+    settle: 最近書き換わったファイルの最後のやり取りは、まだ途中かもしれないので覚えない
+            (返答が終わったときのフックから呼ぶときは、終わっていると分かっているので False)。
+    戻り値: 覚えたやり取りの数
+    """
+    brain, store = life.brain, life.brain.store
+    turns = read_turns(files=list(files), codex_files=list(codex))
+    if not turns:
+        return 0
+    turns.sort(key=lambda t: t["t"])
+    if settle:
+        recent = {p for p in list(files) + list(codex) if time.time() - os.path.getmtime(p) < SETTLE_SECONDS}
+        last = {}
+        for t in turns:
+            if t["session"] in recent:
+                last[t["session"]] = t
+        turns = [t for t in turns if last.get(t["session"]) is not t]
+    known = set(store.keys())
+    new = [t for t in turns if record_key(t) not in known]
+    unify_case(turns)
+    if brain.embedder:
+        brain.embedder.ensure_gists([t["user"] for t in new])
+    for t in turns:   # 記録は、続きが書き足されていれば新しくする
+        store.put(record_key(t), build_record(t))
+    store.commit()
+    store.ensure_vectors()
+    for t in new:
+        life.experience(t)
+    if brain.embedder and new:   # 新しく覚えた概念の埋め込み(計算済みのものは飛ばされる)
+        brain.embedder.ensure(sorted(brain.known_concepts()))
+    return len(new)
+
+
+SETTLE_SECONDS = 30 * 60   # これより最近に書き換わったセッション記録の最後のやり取りは、まだ途中とみなす
+
+
 def parse_time(t):
     return datetime.fromisoformat(t["t"].replace("Z", "+00:00")).astimezone(JST)
 
@@ -565,6 +646,8 @@ def main():
     if os.path.exists(STATE):
         os.remove(STATE)
     brain = Brain(STATE)
+    # 読む前の更新時刻を覚えておく(読んでいる間に書き足された分は、あとで続きとして覚える)
+    scanned = {p: os.path.getmtime(p) for p in claude_files() + codex_files()}
     turns = load_turns(limit, store=brain.store)
     print(f"出来事 {len(turns)}件 ({turns[0]['t'][:10]} 〜 {turns[-1]['t'][:10]})")
     if brain.embedder:  # 出来事の要旨のベクトルを、先にまとめて計算しておく
@@ -579,6 +662,8 @@ def main():
     print(file=sys.stderr)
     brain.context = {}
     brain.save()
+    life.scanned = scanned
+    life.save(LIFE)
 
     places = {c for k in brain.cortex for c in k.split("\t") if c[:2].lower() == "c:" or c.startswith("/")}
     print(f"海馬に入れた出来事 {life.learned}件 / 眠った回数 {life.nights}晩")

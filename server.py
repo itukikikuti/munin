@@ -7,12 +7,15 @@
 """
 import json
 import os
+import queue
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import import_sessions as experience
 from brain import Brain, is_place
 from memory_detail import render
 from tiles import GraphMap
@@ -31,6 +34,10 @@ AUTOSAVE_SECONDS = 600
 brain = None
 mtime = None
 live_session = None   # フックで最後に思い出した会話
+life = None           # 使いながら覚えるための、体験の続きの状態(全件の取り込みで作られる)
+LIFE = os.path.join(os.path.dirname(STATE), "life_state.json")
+learn_queue = queue.Queue()   # 返答が終わった会話(覚える順番待ち)
+CATCH_UP_SECONDS = 3600       # Codex の会話や、取りこぼした会話を拾い直す間隔
 dirty = False         # フックでの想起による強化が、まだ保存されていない
 # 図の作り直しが必要な変更があるたびに増える。起動時刻から始めて、再起動前のタイルをブラウザが使い回さないようにする
 version = int(time.time())
@@ -39,10 +46,11 @@ graph = GraphMap(os.path.join(HERE, "layout.json"))
 
 def load():
     """記憶を読み込む(ファイルが外から書き換えられていたら読み直す)"""
-    global brain, mtime, version
+    global brain, mtime, version, life
     m = os.path.getmtime(STATE) if os.path.exists(STATE) else None
     if brain is None or m != mtime:
         brain = Brain(STATE)
+        life = experience.Life.restore(brain, LIFE)   # 全件の取り込み直しのあとは、その続きから覚える
         mtime = m
         version += 1
     return brain
@@ -129,6 +137,66 @@ def autosave():
             dirty = False
 
 
+def learn(files=(), codex=(), settle=False):
+    """セッション記録の新しいやり取りを覚え、すぐ保存する(呼ぶ側で LOCK を取る)"""
+    global dirty
+    b = load()
+    if life is None:
+        return 0
+    t0 = time.time()
+    keep = (b.context, b.seq)   # 覚えるときの体験で、今の会話のワーキングメモリを崩さない
+    n = experience.learn_new(life, files, codex, settle)
+    b.context, b.seq = keep
+    if n:
+        save()
+        life.save(LIFE)
+        dirty = False
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(os.path.join(LOG_DIR, "learn_log.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "files": len(files) + len(codex),
+                            "learned": n, "ms": round((time.time() - t0) * 1000)}, ensure_ascii=False) + "\n")
+    return n
+
+
+def learner():
+    """返答が終わった会話を、順番に覚える"""
+    while True:
+        path = learn_queue.get()
+        try:
+            with LOCK:
+                if os.path.exists(path):
+                    learn([path])
+        except Exception:  # noqa: BLE001  覚えるのに失敗しても、思い出す方は止めない
+            log_error(traceback.format_exc())
+
+
+def catch_up():
+    """前に読んだあとで書き足されたセッション記録を拾い直す(Codex の会話や、フックが動かなかった会話)"""
+    while True:
+        try:
+            with LOCK:
+                load()
+                if life is not None:
+                    changed = lambda ps: [p for p in ps if os.path.getmtime(p) > life.scanned.get(p, 0)]
+                    files, codex = changed(experience.claude_files()), changed(experience.codex_files())
+                    if files or codex:
+                        learn(files, codex, settle=True)
+                        for p in files + codex:   # 途中かもしれないファイルは、次の回にもう一度読む
+                            m = os.path.getmtime(p)
+                            if time.time() - m >= experience.SETTLE_SECONDS:
+                                life.scanned[p] = m
+                        life.save(LIFE)
+        except Exception:  # noqa: BLE001
+            log_error(traceback.format_exc())
+        time.sleep(CATCH_UP_SECONDS)
+
+
+def log_error(message):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(os.path.join(LOG_DIR, "server_errors.log"), "a", encoding="utf-8") as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+
+
 def handle(path, body):
     with LOCK:
         return _handle(path, body)
@@ -158,6 +226,10 @@ def _handle(path, body):
             result["recall"]["overlay"] = graph.overlay(b.last_activation, r["cues"])
     elif path == "/api/hook":
         return 200, hook_recall(b, body)
+    elif path == "/api/learn":   # 返答が終わった: その会話の新しいやり取りを、あとで(別のスレッドで)覚える
+        if body.get("transcript_path"):
+            learn_queue.put(body["transcript_path"])
+        return 200, {"queued": learn_queue.qsize()}
     elif path == "/api/sleep":
         log = []
         for i in range(max(1, min(60, int(body.get("nights", 1))))):
@@ -180,7 +252,7 @@ def _handle(path, body):
         result = {"log": ["記憶をすべて消去しました"]}
     else:
         return 404, {"error": "not found"}
-    if path != "/api/state" and path != "/api/hook":
+    if path not in ("/api/state", "/api/hook", "/api/learn"):
         save()
         if path != "/api/recall":
             version += 1
@@ -232,6 +304,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
             self.send(*handle(self.path, body))
         except (ValueError, TypeError) as e:
+            log_error(f"{self.path}: {traceback.format_exc()}")   # フックからの問い合わせの失敗に気づけるように
             self.send(400, {"error": str(e)})
 
     def log_message(self, fmt, *args):
@@ -251,4 +324,6 @@ if __name__ == "__main__":
     print(f"http://127.0.0.1:{PORT}", flush=True)
     threading.Thread(target=warm_up, daemon=True).start()
     threading.Thread(target=autosave, daemon=True).start()
+    threading.Thread(target=learner, daemon=True).start()
+    threading.Thread(target=catch_up, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

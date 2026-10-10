@@ -1,7 +1,8 @@
 """Claude Code のフック: メッセージを送るたびに、関係しそうな記憶を思い出して差し込む
 
-  ~/.claude/settings.json の hooks.UserPromptSubmit に登録する:
-    python C:\\dev\\brain-memory\\hook.py
+  ~/.claude/settings.json に登録する:
+    UserPromptSubmit(メッセージを送ったとき): python C:\\dev\\brain-memory\\hook.py          思い出して差し込む
+    Stop(返答が終わったとき)               : python C:\\dev\\brain-memory\\hook.py --learn  そのやり取りを覚える
 
 記憶は常駐サーバー(server.py)が持っていて、このフックはそこへ問い合わせるだけ
 (毎回記憶を読み込むと、数十秒かかるため)。サーバーが動いていなければ起動し、
@@ -20,6 +21,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/hook"
+LEARN_URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/learn"
+LEARN = "--learn" in sys.argv   # 返答が終わったとき(Stop)に呼ばれる: 思い出すのではなく、覚える
 TIMEOUT = 12          # 秒。フック全体の制限時間(settings.json の timeout)より短くする
 LOG_DIR = os.path.join(HERE, "logs")
 
@@ -48,15 +51,25 @@ def main():
     except ValueError as e:
         log_error(f"入力を読めない: {e}")
         return
-    prompt = (event.get("prompt") or "").strip()
-    if not prompt or prompt.startswith("/"):   # コマンドには記憶は要らない
-        return
-    body = json.dumps({"prompt": prompt, "session_id": event.get("session_id"), "cwd": event.get("cwd"),
-                       "transcript_path": event.get("transcript_path")}, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(URL, body, {"Content-Type": "application/json"})
+    if LEARN:
+        # 返答が終わった: その会話の新しいやり取りを覚えてもらう(サーバーが別のスレッドで覚えるので、すぐ戻る)
+        if not event.get("transcript_path"):
+            return
+        url, body = LEARN_URL, {"transcript_path": event["transcript_path"]}
+    else:
+        prompt = (event.get("prompt") or "").strip()
+        if not prompt or prompt.startswith("/"):   # コマンドには記憶は要らない
+            return
+        url, body = URL, {"prompt": prompt, "session_id": event.get("session_id"), "cwd": event.get("cwd"),
+                          "transcript_path": event.get("transcript_path")}
+    req = urllib.request.Request(url, json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                                 {"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
             text = json.load(res).get("text", "")
+    except urllib.error.HTTPError as e:
+        log_error(f"問い合わせに失敗: {e} {e.read().decode('utf-8', 'replace')[:300]}")
+        return
     except urllib.error.URLError as e:
         if isinstance(e.reason, ConnectionRefusedError) or "refused" in str(e.reason).lower() \
                 or getattr(e.reason, "winerror", None) == 10061:
