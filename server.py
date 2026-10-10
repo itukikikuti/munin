@@ -25,8 +25,13 @@ LOCK = threading.Lock()   # 記憶の読み書きを1リクエストずつにす
 HIPPO_SHOWN = 60          # 画面の一覧に出す海馬の記録(新しい順)
 LINKS_SHOWN = 200         # 画面の一覧に出す皮質のリンク(強い順)
 
+LOG_DIR = os.path.join(HERE, "logs")
+AUTOSAVE_SECONDS = 600
+
 brain = None
 mtime = None
+live_session = None   # フックで最後に思い出した会話
+dirty = False         # フックでの想起による強化が、まだ保存されていない
 # 図の作り直しが必要な変更があるたびに増える。起動時刻から始めて、再起動前のタイルをブラウザが使い回さないようにする
 version = int(time.time())
 graph = GraphMap(os.path.join(HERE, "layout.json"))
@@ -76,6 +81,54 @@ def snapshot(b):
     }
 
 
+def hook_recall(b, body):
+    """Claude Code のフック(メッセージ送信時)から呼ばれる: 思い出したことを返し、何を出したかを記録する
+
+    記録は、しばらく使ったあとで「差し込んだ記憶を Claude が実際に使ったか」を分析するためのもの。
+    """
+    global live_session, dirty
+    t0 = time.time()
+    prompt = (body.get("prompt") or "").strip()
+    sid = body.get("session_id") or ""
+    session = f"{sid}.jsonl" if sid else None   # 記憶の中では、会話をセッション記録のファイル名で区別している
+    if session != live_session:
+        b.context = {}   # 新しい会話(または別の会話に切り替わった): 前の会話で考えていたことは持ち越さない
+        live_session = session
+    new_conversation = not b.context
+    r = b.recollect(prompt, session=session, cwd=body.get("cwd") or None)
+    dirty = True
+    entry = {
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session_id": sid, "cwd": body.get("cwd"),
+        "transcript_path": body.get("transcript_path"), "prompt": prompt, "new_conversation": new_conversation,
+        "episodes": [{"ref": e["ref"], "conf": round(e["conf"], 3), "prompt": e["prompt"], "when": e["when"]}
+                     for e in r["episodes"]],
+        "ranked": [{"ref": e["ref"], "conf": round(e["conf"], 3)} for e in r["ranked"]],
+        "todos": [{"id": it["id"], "text": it["text"], "due": it["due"]} for it in r["todos"]],
+        "recent": [e["ref"] for e in r["recent"]],
+        "places": [p["name"] for p in r["places"]], "concepts": [c["name"] for c in r["concepts"]],
+        "cues": r["cues"][:20], "text": r["text"], "ms": round((time.time() - t0) * 1000),
+    }
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(os.path.join(LOG_DIR, "recall_log.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return {"text": r["text"], "ms": entry["ms"]}
+
+
+def autosave():
+    """フックでの想起による強化を、ときどき保存する(1回ごとに 20MB を書くと遅いため)
+
+    取り込み直しなどで記憶のファイルが外から書き換えられていたら、保存せずに読み直しに任せる。
+    """
+    global dirty
+    while True:
+        time.sleep(AUTOSAVE_SECONDS)
+        with LOCK:
+            m = os.path.getmtime(STATE) if os.path.exists(STATE) else None
+            if dirty and brain is not None and m == mtime:
+                save()
+            dirty = False
+
+
 def handle(path, body):
     with LOCK:
         return _handle(path, body)
@@ -103,6 +156,8 @@ def _handle(path, body):
                              "embedding": bool(b.embedder and b.embedder.available)}}
         if graph.version is not None:
             result["recall"]["overlay"] = graph.overlay(b.last_activation, r["cues"])
+    elif path == "/api/hook":
+        return 200, hook_recall(b, body)
     elif path == "/api/sleep":
         log = []
         for i in range(max(1, min(60, int(body.get("nights", 1))))):
@@ -125,7 +180,7 @@ def _handle(path, body):
         result = {"log": ["記憶をすべて消去しました"]}
     else:
         return 404, {"error": "not found"}
-    if path != "/api/state":
+    if path != "/api/state" and path != "/api/hook":
         save()
         if path != "/api/recall":
             version += 1
@@ -184,6 +239,16 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("%s %s\n" % (self.command, self.path))
 
 
+def warm_up():
+    """最初のメッセージで待たせないよう、記憶と検索の準備を起動時に済ませておく"""
+    with LOCK:
+        b = load()
+        b.recollect("起動", reinforce=False)
+        b.context = {}
+
+
 if __name__ == "__main__":
     print(f"http://127.0.0.1:{PORT}", flush=True)
+    threading.Thread(target=warm_up, daemon=True).start()
+    threading.Thread(target=autosave, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

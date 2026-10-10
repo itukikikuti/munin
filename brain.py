@@ -223,7 +223,8 @@ def recollection_text(r):
         lines.append("関連する語・ファイル: " + ", ".join(c["name"] for c in r["concepts"]))
     if not lines:
         return ""
-    lines.append("([ ] は記録の鍵。詳しい中身は鍵で記録を開いて確認できる)")
+    lines.append("([ ] は記録の鍵。詳しい中身は "
+                 f"python {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'memory_detail.py')} 鍵 で開ける)")
     return "<思い出したこと>\n" + "\n".join(lines) + "\n</思い出したこと>"
 
 
@@ -737,12 +738,17 @@ class Brain:
                 "places": places, "concepts": tr["concepts"]}
 
     def place_exists(self, place):
-        """その場所(フォルダ)が今もあるか。このPCのパスでなければ、あるとみなす。確かめた結果は1分間使い回す"""
+        """その場所(フォルダ)が今もあるか。このPCのパスでなければ、あるとみなす。確かめた結果は1分間使い回す
+
+        別のPCで覚えた場所(このPCにないユーザーのフォルダの中)は、なくなったのではなく確かめられないだけなので、あるとみなす。
+        """
         if not self.check_places or not re.match(r"^[A-Za-z]:", place):
             return True
         hit = self._place_cache.get(place)
         if hit is None or time.time() - hit[1] > 60:
-            hit = (os.path.isdir(place), time.time())
+            user = re.match(r"(?i)^([a-z]:\\users\\[^\\]+)", place)
+            other_pc = bool(user) and not os.path.isdir(user.group(1))
+            hit = (other_pc or os.path.isdir(place), time.time())
             self._place_cache[place] = hit
         return hit[0]
 

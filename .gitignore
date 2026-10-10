@@ -13,3 +13,6 @@ records_vectors.npy
 records.sqlite
 
 __pycache__/
+
+# Claude で使ったときの記録(差し込んだ内容。後で分析する。個人の会話を含むので管理しない)
+logs/

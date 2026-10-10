@@ -24,6 +24,7 @@ QUERY_INSTRUCT = ("Instruct: Given a user's request about their work, "
 MAX_TEXT = 2000          # 貼り付けたログなどで長すぎる文は、先頭だけで要旨をとる
 BATCH = 64
 KEEP_ALIVE = "30m"
+NUM_CTX = 2048           # 文は MAX_TEXT 文字までに切るので、この長さで足りる
 QUERY_BATCH = 16
 
 
@@ -73,8 +74,11 @@ class Embedder:
         self.dirty = True
 
     def _request(self, texts):
-        # モデルを読み込み直すと数秒かかるので、使い終わってもしばらく載せたままにする
-        body = json.dumps({"model": self.model, "input": texts, "keep_alive": KEEP_ALIVE}).encode()
+        # モデルを読み込み直すと数秒かかるので、使い終わってもしばらく載せたままにする。
+        # 文脈長を絞らないと、既定の長さ(8b は 40960)の分だけメモリを取り、8GB の GPU では
+        # 2つのモデルが同時に載らず、切り替えのたびに読み込み直しになる(1回7秒 → 絞ると 0.02秒)
+        body = json.dumps({"model": self.model, "input": texts, "keep_alive": KEEP_ALIVE,
+                           "options": {"num_ctx": NUM_CTX}}).encode()
         req = urllib.request.Request(f"{OLLAMA_URL}/api/embed", body,
                                      {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=600) as res:
