@@ -9,6 +9,7 @@
 import os
 import sys
 
+import paths
 from store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +44,7 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return
-    store = Store(os.path.join(HERE, "records.sqlite"))
+    store = Store(os.path.join(paths.DATA, "records.sqlite"))
     key = store.find(sys.argv[1])
     if not key:
         print(f"鍵 {sys.argv[1]} の記録が見つからない(または1件に決まらない)")

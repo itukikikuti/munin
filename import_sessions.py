@@ -22,12 +22,13 @@ from datetime import datetime, timedelta, timezone
 
 from janome.tokenizer import Tokenizer
 
+import paths
 from brain import SLEEP_HOURS, Brain
 from intentions import extract, mentions_done
 from store import RESULT_CHARS, Store, build_record, tool_summary
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
+STATE = paths.STATE
 LIFE = os.path.join(os.path.dirname(STATE), "life_state.json")   # 続きから覚えるための、体験の途中の状態
 PROJECTS = os.path.expanduser("~/.claude/projects")
 HOME = os.path.expanduser("~")

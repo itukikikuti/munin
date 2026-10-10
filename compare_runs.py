@@ -14,8 +14,10 @@ import os
 import random
 import sys
 
+import paths
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(os.environ.get("BRAIN_DATA", HERE), "eval")
+OUT = os.path.join(os.environ.get("BRAIN_DATA", paths.DATA), "eval")
 BOOTSTRAP = 5000
 
 

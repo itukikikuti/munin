@@ -19,10 +19,11 @@ import re
 import sys
 from collections import defaultdict
 
+import paths
 from brain import Brain, is_place
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-LOG = os.path.join(HERE, "logs", "recall_log.jsonl")
+LOG = os.path.join(paths.LOG_DIR, "recall_log.jsonl")
 BINS = [(0.0, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.01)]
 
 
@@ -67,7 +68,7 @@ def main():
     args = ap.parse_args()
     with open(LOG, encoding="utf-8") as f:
         entries = [e for e in map(json.loads, f) if e["time"] >= args.since]
-    brain = Brain(os.path.join(HERE, "brain_state.json"), embedder=None, store=None)
+    brain = Brain(paths.STATE, embedder=None, store=None)
     concepts_of = {tr.get("ref"): tr["concepts"] for tr in brain.traces if tr.get("ref")}
 
     by_bin = defaultdict(lambda: [0, 0, 0])   # 確信度の区間 -> [差し込んだ数, 開いた数, 語が出た数]

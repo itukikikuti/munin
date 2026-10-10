@@ -1,0 +1,12 @@
+{
+  "name": "munin",
+  "owner": { "name": "itukikikuti" },
+  "description": "munin(すべての会話を1つの記憶にして、関係する過去を思い出させるプラグイン)の置き場所",
+  "plugins": [
+    {
+      "name": "munin",
+      "source": "./",
+      "description": "すべての会話を1つの記憶にして、メッセージを送るたびに関係する過去を思い出して渡す"
+    }
+  ]
+}

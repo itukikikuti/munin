@@ -223,8 +223,7 @@ def recollection_text(r):
         lines.append("関連する語・ファイル: " + ", ".join(c["name"] for c in r["concepts"]))
     if not lines:
         return ""
-    lines.append("([ ] は記録の鍵。詳しい中身は "
-                 f"python {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'memory_detail.py')} 鍵 で開ける)")
+    lines.append("([ ] は記録の鍵。詳しい中身は munin の recall_detail で鍵を開ける。足りなければ recall で探し直せる)")
     return "<思い出したこと>\n" + "\n".join(lines) + "\n</思い出したこと>"
 
 
@@ -974,8 +973,8 @@ def format_recall(cues, fragments, answer):
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    state = os.environ.get("BRAIN_STATE",
-                           os.path.join(os.path.dirname(os.path.abspath(__file__)), "brain_state.json"))
+    import paths
+    state = paths.STATE
     args = sys.argv[1:]
     if not args:
         print("使い方:\n"

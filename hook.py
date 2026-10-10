@@ -22,12 +22,14 @@ import time
 import urllib.error
 import urllib.request
 
+import paths
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/hook"
 LEARN_URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/learn_session"
 LEARN = "--learn" in sys.argv   # 返答が終わったとき(Stop)に呼ばれる: 思い出すのではなく、覚える
 TIMEOUT = 12          # 秒。フック全体の制限時間(settings.json の timeout)より短くする
-LOG_DIR = os.path.join(HERE, "logs")
+LOG_DIR = paths.LOG_DIR
 
 
 def log_error(message):
@@ -46,6 +48,51 @@ def start_server():
                          stdin=subprocess.DEVNULL, creationflags=flags, close_fds=True)
 
 
+def problems():
+    """動かすのに足りないもの(なければ空)"""
+    import importlib.util
+    out = []
+    missing = [m for m in REQUIRED if importlib.util.find_spec(m) is None]
+    if missing:
+        out.append(f"Python のパッケージが入っていない: {', '.join(missing)}")
+    try:
+        with urllib.request.urlopen(f"{OLLAMA_URL}/api/tags", timeout=3) as res:
+            names = {m["name"] for m in json.load(res).get("models", [])}
+        lacking = [m for m in MODELS if m not in names]
+        if lacking:
+            out.append(f"Ollama に埋め込みモデルがない: {', '.join(lacking)}")
+    except (OSError, ValueError):
+        out.append("Ollama が動いていない(Ollama のアプリを起動する)")
+    return out
+
+
+def session_start():
+    """会話の始まり: 準備ができていればサーバーを起こしておき、できていなければ Claude に伝える"""
+    lacking = problems()
+    if lacking:
+        message = ("munin(記憶のプラグイン)は、次の理由でまだ使えません。ユーザーに伝え、"
+                   "/munin:setup の実行をすすめてください。\n- " + "\n- ".join(lacking))
+    else:
+        try:
+            urllib.request.urlopen(STATUS_URL, timeout=2).read()
+            return
+        except OSError:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            start_server()   # 最初のメッセージで思い出せるように、先に起こしておく
+        if os.path.exists(paths.STATE):
+            return
+        message = ("munin(記憶のプラグイン)は、これまでの会話から最初の記憶を作っています"
+                   "(会話の量によって数分〜数十分)。できるまでは思い出したことは差し込まれません。")
+    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": message}}
+    sys.stdout.buffer.write(json.dumps(out, ensure_ascii=False).encode("utf-8"))
+
+
+REQUIRED = ["janome", "wordfreq", "numpy", "PIL"]
+MODELS = sorted({paths.config().get("embed_model", "qwen3-embedding:8b"), "qwen3-embedding:0.6b"})
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+STATUS_URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/status"
+
+
 def main():
     # Windows では標準入力を一度に読むと空になることがあるので、最後まで読み切る
     raw = sys.stdin.buffer.read()
@@ -54,6 +101,8 @@ def main():
     except ValueError as e:
         log_error(f"入力を読めない: {e}")
         return
+    if "--session-start" in sys.argv:
+        return session_start()
     if LEARN:
         # 返答が終わった: その会話の新しいやり取りを覚えてもらう(サーバーが別のスレッドで覚えるので、すぐ戻る)
         if not event.get("transcript_path"):

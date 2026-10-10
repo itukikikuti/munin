@@ -13,10 +13,12 @@ import json
 import os
 import sys
 
+import paths
+
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(os.environ.get("BRAIN_DATA", HERE), "eval")
+OUT = os.path.join(os.environ.get("BRAIN_DATA", paths.DATA), "eval")
 FEATURES = ["gist", "concept", "base", "detail", "keyword", "place"]
 K = 5
 GRID = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0]

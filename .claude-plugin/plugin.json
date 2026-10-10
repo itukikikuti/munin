@@ -1,0 +1,14 @@
+{
+  "name": "munin",
+  "version": "0.1.0",
+  "description": "Claude Code と Codex のすべての会話を1つの記憶にして、メッセージを送るたびに、関係する過去を思い出して渡す(人の記憶のしくみ、LLM は使わない)",
+  "author": { "name": "itukikikuti" },
+  "license": "MIT",
+  "homepage": "https://github.com/itukikikuti/munin",
+  "mcpServers": {
+    "munin": {
+      "command": "python",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp_server.py"]
+    }
+  }
+}

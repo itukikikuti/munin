@@ -8,6 +8,7 @@
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -15,20 +16,22 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import paths
 import import_sessions as experience
-from brain import Brain, is_place
+from brain import Brain, is_place, recollection_text
+from intentions import asks_todo
 from memory_detail import render
 from tiles import GraphMap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATE = os.environ.get("BRAIN_STATE", os.path.join(HERE, "brain_state.json"))
+STATE = paths.STATE
 PORT = int(os.environ.get("PORT", 8770))
 AWAKE_HOURS = 16
 LOCK = threading.Lock()   # 記憶の読み書きを1リクエストずつにする
 HIPPO_SHOWN = 60          # 画面の一覧に出す海馬の記録(新しい順)
 LINKS_SHOWN = 200         # 画面の一覧に出す皮質のリンク(強い順)
 
-LOG_DIR = os.path.join(HERE, "logs")
+LOG_DIR = paths.LOG_DIR
 AUTOSAVE_SECONDS = 600
 
 brain = None
@@ -38,10 +41,11 @@ life = None           # 使いながら覚えるための、体験の続きの�
 LIFE = os.path.join(os.path.dirname(STATE), "life_state.json")
 learn_queue = queue.Queue()   # 返答が終わった会話(覚える順番待ち)
 CATCH_UP_SECONDS = 3600       # Codex の会話や、取りこぼした会話を拾い直す間隔
+importing = False     # 最初の記憶を作っている途中
 dirty = False         # フックでの想起による強化が、まだ保存されていない
 # 図の作り直しが必要な変更があるたびに増える。起動時刻から始めて、再起動前のタイルをブラウザが使い回さないようにする
 version = int(time.time())
-graph = GraphMap(os.path.join(HERE, "layout.json"))
+graph = GraphMap(os.path.join(paths.DATA, "layout.json"))
 
 
 def load():
@@ -95,6 +99,8 @@ def hook_recall(b, body):
     記録は、しばらく使ったあとで「差し込んだ記憶を Claude が実際に使ったか」を分析するためのもの。
     """
     global live_session, dirty
+    if importing:   # 最初の記憶を作っている途中
+        return {"text": "", "ms": 0}
     t0 = time.time()
     prompt = (body.get("prompt") or "").strip()
     sid = body.get("session_id") or ""
@@ -173,6 +179,8 @@ def learner():
 def catch_up():
     """前に読んだあとで書き足されたセッション記録を拾い直す(Codex の会話や、フックが動かなかった会話)"""
     while True:
+        while importing:   # 最初の記憶を作り終わるまで待つ
+            time.sleep(10)
         try:
             with LOCK:
                 load()
@@ -226,6 +234,16 @@ def _handle(path, body):
             result["recall"]["overlay"] = graph.overlay(b.last_activation, r["cues"])
     elif path == "/api/hook":
         return 200, hook_recall(b, body)
+    elif path == "/api/search":   # Claude が自分で探す(MCP の recall)。今の会話のワーキングメモリは変えない
+        if importing:
+            return 200, {"importing": True, "text": ""}
+        query = (body.get("query") or "").strip()
+        r = b.recollect(query, use_context=False, reinforce=False, cwd=body.get("cwd") or None)
+        # 探すときは、会話の始まりに出す「直前の作業」は要らない。やることは、尋ねられたときだけ出す
+        r["recent"] = []
+        if not asks_todo(query):
+            r["todos"] = []
+        return 200, {"text": recollection_text(r)}
     elif path == "/api/learn_session":   # 返答が終わった: その会話の新しいやり取りを、あとで(別のスレッドで)覚える
         if body.get("transcript_path"):
             learn_queue.put(body["transcript_path"])
@@ -252,7 +270,7 @@ def _handle(path, body):
         result = {"log": ["記憶をすべて消去しました"]}
     else:
         return 404, {"error": "not found"}
-    if path not in ("/api/state", "/api/hook", "/api/learn_session"):
+    if path not in ("/api/state", "/api/hook", "/api/learn_session", "/api/search"):
         save()
         if path != "/api/recall":
             version += 1
@@ -284,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "not found"})
             g = current_graph()
             self.send(200, g.tile(z, x, y, q.get("theme", "light")), "image/png", cache=True)
+        elif url.path == "/api/status":   # 動いているか(記憶を読み込まずにすぐ答える)
+            self.send(200, {"importing": importing, "loaded": brain is not None})
         elif url.path == "/api/graph":
             self.send(200, current_graph().meta())
         elif url.path == "/api/record":
@@ -313,7 +333,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def warm_up():
-    """最初のメッセージで待たせないよう、記憶と検索の準備を起動時に済ませておく"""
+    """最初のメッセージで待たせないよう、記憶と検索の準備を起動時に済ませておく
+
+    記憶がまだなければ(初めて使うとき)、これまでのすべての会話から最初の記憶を作る。
+    """
+    global importing
+    if importing:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(os.path.join(LOG_DIR, "import.log"), "ab") as out:
+            subprocess.run([sys.executable, os.path.join(HERE, "import_sessions.py")], cwd=HERE,
+                           stdout=out, stderr=out, stdin=subprocess.DEVNULL)
+        importing = False
     with LOCK:
         b = load()
         b.recollect("起動", reinforce=False)
@@ -322,6 +352,7 @@ def warm_up():
 
 if __name__ == "__main__":
     print(f"http://127.0.0.1:{PORT}", flush=True)
+    importing = not os.path.exists(STATE)   # 記憶がまだない(初めて使う)なら、最初の記憶を作る
     threading.Thread(target=warm_up, daemon=True).start()
     threading.Thread(target=autosave, daemon=True).start()
     threading.Thread(target=learner, daemon=True).start()

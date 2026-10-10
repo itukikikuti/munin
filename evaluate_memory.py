@@ -36,6 +36,7 @@ import time
 
 import numpy as np
 
+import paths
 import brain as brain_module
 from brain import EP_S, EP_TAU, EPISODES_SHOWN, Brain, at_place, is_place, recollection_text
 from embed import Embedder
@@ -43,7 +44,7 @@ from import_sessions import Life, load_turns, record_key, store_records
 from store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DATA = os.environ.get("BRAIN_DATA", HERE)   # 埋め込みのキャッシュとやり取りの記録の置き場所(コードを別の場所にコピーして評価するとき用)
+DATA = os.environ.get("BRAIN_DATA", paths.DATA)   # 埋め込みのキャッシュとやり取りの記録の置き場所(コードを別の場所にコピーして評価するとき用)
 OUT = os.path.join(DATA, "eval")
 K = EPISODES_SHOWN
 METHODS = ["記憶モデル", "RAG", "直近", "キーワード"]

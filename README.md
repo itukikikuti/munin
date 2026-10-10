@@ -16,7 +16,7 @@ Claude Code と Codex のすべての会話を1つの記憶にして、メッセ
 - [8351eb2f] 10/08 09:05 C:\dev\munin 「ネットワーク図出来てない。…」 確かさ0.86
   手がかり: ネットワーク図, タイル, 濃淡 / 返答「原因は、タイルの背景が透明だったことでした。…」
 関係しそうな場所: C:\dev\munin
-([ ] は記録の鍵。詳しい中身は python memory_detail.py 鍵 で開ける)
+([ ] は記録の鍵。詳しい中身は munin の recall_detail で鍵を開ける。足りなければ recall で探し直せる)
 </思い出したこと>
 ```
 
@@ -33,29 +33,36 @@ Claude Code と Codex のすべての会話を1つの記憶にして、メッセ
 | 展望記憶 | 「あとで〜する」を覚えておく | 「〜日までに」「保留」「〜さんに確認」を覚え、終わったら完了にする |
 | ワーキングメモリ | 「これ」「直して」は今の話題を指す | 指示語や対象の省略があれば、直前の話題(5つまで)に注意を向ける |
 
-## 必要なもの
+## 入れ方(Claude Code のプラグイン)
 
-- Python 3.10 以上: `pip install janome wordfreq numpy Pillow`
-- [Ollama](https://ollama.com) と埋め込みモデル: `ollama pull qwen3-embedding:8b` と `ollama pull qwen3-embedding:0.6b`
-
-## 使い方
+必要なもの: Python 3.10 以上(`python` で起動できること)と [Ollama](https://ollama.com)(アプリを起動しておく)
 
 ```bash
-python import_sessions.py      # すべてのセッション記録から記憶を作る(最初の1回)
-python server.py               # 記憶を画面で見る(http://127.0.0.1:8770、ネットワーク図つき)
+claude plugin marketplace add itukikikuti/munin
+claude plugin install munin@munin
 ```
 
-Claude Code につなぐには、`~/.claude/settings.json` の `hooks` に登録する。
+入れたら、Claude Code で `/munin:setup` を実行する。足りないものを入れて、これまでのすべての会話から最初の記憶を作る。
 
-```json
-"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "python C:/dev/munin/hook.py", "timeout": 15}]}],
-"Stop": [{"hooks": [{"type": "command", "command": "python C:/dev/munin/hook.py --learn", "timeout": 10}]}]
-```
+- Python のパッケージ(janome・wordfreq・numpy・Pillow)を入れる
+- Ollama に埋め込みモデルを入れる。GPU(NVIDIA、6GB 以上)があれば精度の高い `qwen3-embedding:8b`(約4.7GB)、
+  なければ軽い `qwen3-embedding:0.6b`(約0.6GB)だけを使う。`/munin:setup --full` / `--light` で選べる
+- 最初の記憶づくりは裏で進む(会話の量によって数分〜数十分)。終わるまでは思い出したことは差し込まれない
 
-- パスは `/` で区切る。Windows でもフックは bash で実行され、`\` が消えてファイルが見つからなくなる
-  (Python は終了コード 2 で終わり、Claude Code はそれを「プロンプトを止める」と受け取る)
-- メッセージを送るたびに思い出して差し込み、返答が終わるたびにそのやり取りを覚える。
-  Codex の会話などは、1時間ごとに拾い直す。記憶は常駐サーバーが持ち、動いていなければフックが起動する
+## 動き方
+
+| いつ | 何をする |
+|---|---|
+| 会話の始まり | 準備ができているか確かめ、記憶の常駐サーバーを起こしておく。足りないものがあれば Claude に伝える |
+| メッセージを送ったとき | 関係しそうな記憶を思い出して差し込む |
+| 返答が終わったとき | そのやり取りを覚える(Codex の会話などは、1時間ごとに拾い直す) |
+| Claude が必要なとき | 道具 `recall`(言葉で探し直す)と `recall_detail`(鍵から記録を開く)を使う |
+
+- 記憶のデータは `~/.munin` に置く(`MUNIN_HOME` で変えられる)。すべてこの PC の中で動き、会話の内容を外へ送らない
+- 差し込むたびに、何を出したかを `~/.munin/logs/recall_log.jsonl` に記録する。`python analyze_usage.py` で、
+  差し込んだ記憶が実際に使われたかを確信度ごとに集計できる
+- 記憶を画面で見るには、常駐サーバーが動いている間に http://127.0.0.1:8770 を開く(ネットワーク図つき)
+- 記憶を作り直すには `python import_sessions.py`(常駐サーバーは自動で読み直す)
 
 ## 評価
 
@@ -79,7 +86,10 @@ RAG・キーワード検索・直近と比べ、仕組みを1つずつ外して�
 | `embed.py` | Ollama での埋め込み |
 | `intentions.py` | 「これからやること」の取り出し |
 | `hook.py` / `server.py` | Claude Code のフックと常駐サーバー(画面もここから) |
-| `memory_detail.py` | 鍵から記録を開く |
+| `mcp_server.py` | Claude が自分で使う道具(recall・recall_detail) |
+| `install.py` | 最初の準備(`/munin:setup` から呼ばれる) |
+| `paths.py` | 記憶のデータの置き場所 |
+| `memory_detail.py` | 鍵から記録を開く(コマンドで使うとき) |
+| `.claude-plugin/` / `hooks/` / `commands/` | Claude Code のプラグインとしての設定 |
 
-記憶のデータ(`brain_state.json`・`records.sqlite`・埋め込み)と使ったときの記録(`logs/`)は、
-個人の会話を含むので、リポジトリには入れない。
+記憶のデータと使ったときの記録は、個人の会話を含むので、リポジトリではなく `~/.munin` に置く。
