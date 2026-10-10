@@ -144,7 +144,8 @@ def clean_prompt(text):
     貼り付けた文章(<pasted_content>)などのタグは外して中身を残す。
     コマンド(/goal など)は、引数があるときだけ「/名前 引数」として残す(引数のない /compact などは指示の中身がない)。
     """
-    s = text.strip()
+    # アプリが依頼の前に付ける注意書き(フォルダを選ばずに始めた会話など)は外し、残りを依頼とする
+    s = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.S).strip()
     if s.startswith(SYSTEM_TAGS):
         return ""
     m = re.search(r"<command-name>\s*(.*?)\s*</command-name>", s, re.S)

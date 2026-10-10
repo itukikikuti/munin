@@ -1,8 +1,10 @@
 """Claude Code のフック: メッセージを送るたびに、関係しそうな記憶を思い出して差し込む
 
   ~/.claude/settings.json に登録する:
-    UserPromptSubmit(メッセージを送ったとき): python C:\\dev\\brain-memory\\hook.py          思い出して差し込む
-    Stop(返答が終わったとき)               : python C:\\dev\\brain-memory\\hook.py --learn  そのやり取りを覚える
+    UserPromptSubmit(メッセージを送ったとき): python C:/dev/brain-memory/hook.py          思い出して差し込む
+    Stop(返答が終わったとき)               : python C:/dev/brain-memory/hook.py --learn  そのやり取りを覚える
+  パスは / で区切る(Windows でもフックは bash で実行され、\\ が消えてファイルが見つからなくなる。
+  Python はファイルが見つからないと終了コード 2 で終わり、Claude Code はそれを「プロンプトを止める」と受け取る)
 
 記憶は常駐サーバー(server.py)が持っていて、このフックはそこへ問い合わせるだけ
 (毎回記憶を読み込むと、数十秒かかるため)。サーバーが動いていなければ起動し、
@@ -13,6 +15,7 @@ logs/hook_errors.log に書き残す。
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -57,7 +60,8 @@ def main():
             return
         url, body = LEARN_URL, {"transcript_path": event["transcript_path"]}
     else:
-        prompt = (event.get("prompt") or "").strip()
+        # アプリが依頼の前に付けるシステムの注意書きは、ユーザーの言葉ではないので除く
+        prompt = re.sub(r"<system-reminder>.*?</system-reminder>", "", event.get("prompt") or "", flags=re.S).strip()
         if not prompt or prompt.startswith("/"):   # コマンドには記憶は要らない
             return
         url, body = URL, {"prompt": prompt, "session_id": event.get("session_id"), "cwd": event.get("cwd"),
