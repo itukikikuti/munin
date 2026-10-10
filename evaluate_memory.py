@@ -54,12 +54,12 @@ VALID_N = 300           # 調整用の期間のやり取りの数(最終確認�
 CONF_BINS = [(0.0, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.01)]
 SECTIONS = ["todos", "recent", "episodes", "places", "concepts"]
 CANDIDATES = 50        # 候補の段階での再現率を測るときの件数
-DEV_PLACE = "brain-memory"
+DEV_PLACES = ("brain-memory", "munin")   # このプロジェクトのフォルダ(旧名と今の名前)
 
 
 def is_dev(t):
-    """brain-memory 自体を作っているやり取りか(試しに思い出させた質問や結果が多く、評価を歪めうる)"""
-    return any(DEV_PLACE in p.lower() for p in t["places"] + [t["cwd"] or ""])
+    """このプロジェクト自体を作っているやり取りか(試しに思い出させた質問や結果が多く、評価を歪めうる)"""
+    return any(d in p.lower() for d in DEV_PLACES for p in t["places"] + [t["cwd"] or ""])
 
 
 def relevant(concepts, used):
@@ -237,7 +237,7 @@ def make_report(results, train, test, seconds, args):
         lines.append(f"| {m} | {mean(scored, m, 0):.1%} | {mean(scored, m, 1):.1%} | "
                      f"{mean(first, m, 0):.1%}({len(first)}件) | {mean(later, m, 0):.1%}({len(later)}件) |")
     clean = [x for x in scored if not x["dev"]]
-    lines += ["", f"brain-memory 自体を作っているやり取り({len(scored) - len(clean)}件)を除いた {len(clean)}件では:", "",
+    lines += ["", f"このプロジェクト自体を作っているやり取り({len(scored) - len(clean)}件)を除いた {len(clean)}件では:", "",
               "| 方式 | 再現率 | 適合率 |", "|---|---|---|"]
     for m in METHODS:
         lines.append(f"| {m} | {mean(clean, m, 0):.1%} | {mean(clean, m, 1):.1%} |")

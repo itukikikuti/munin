@@ -56,7 +56,7 @@ def main():
     ap.add_argument("base")
     ap.add_argument("other")
     ap.add_argument("--method", default="記憶モデル", help="other 側で比べる方式(base 側はいつも記憶モデル)")
-    ap.add_argument("--no-dev", action="store_true", help="brain-memory 自体を作っているやり取りを除く")
+    ap.add_argument("--no-dev", action="store_true", help="このプロジェクト自体を作っているやり取りを除く")
     args = ap.parse_args()
     a, b = load(args.base), load(args.other)
     keys = [k for k in a if k in b and not (args.no_dev and a[k].get("dev"))]

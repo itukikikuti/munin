@@ -1,8 +1,8 @@
 """Claude Code のフック: メッセージを送るたびに、関係しそうな記憶を思い出して差し込む
 
   ~/.claude/settings.json に登録する:
-    UserPromptSubmit(メッセージを送ったとき): python C:/dev/brain-memory/hook.py          思い出して差し込む
-    Stop(返答が終わったとき)               : python C:/dev/brain-memory/hook.py --learn  そのやり取りを覚える
+    UserPromptSubmit(メッセージを送ったとき): python C:/dev/munin/hook.py          思い出して差し込む
+    Stop(返答が終わったとき)               : python C:/dev/munin/hook.py --learn  そのやり取りを覚える
   パスは / で区切る(Windows でもフックは bash で実行され、\\ が消えてファイルが見つからなくなる。
   Python はファイルが見つからないと終了コード 2 で終わり、Claude Code はそれを「プロンプトを止める」と受け取る)
 
@@ -24,7 +24,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/hook"
-LEARN_URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/learn"
+LEARN_URL = f"http://127.0.0.1:{os.environ.get('PORT', 8770)}/api/learn_session"
 LEARN = "--learn" in sys.argv   # 返答が終わったとき(Stop)に呼ばれる: 思い出すのではなく、覚える
 TIMEOUT = 12          # 秒。フック全体の制限時間(settings.json の timeout)より短くする
 LOG_DIR = os.path.join(HERE, "logs")

@@ -226,7 +226,7 @@ def _handle(path, body):
             result["recall"]["overlay"] = graph.overlay(b.last_activation, r["cues"])
     elif path == "/api/hook":
         return 200, hook_recall(b, body)
-    elif path == "/api/learn":   # 返答が終わった: その会話の新しいやり取りを、あとで(別のスレッドで)覚える
+    elif path == "/api/learn_session":   # 返答が終わった: その会話の新しいやり取りを、あとで(別のスレッドで)覚える
         if body.get("transcript_path"):
             learn_queue.put(body["transcript_path"])
         return 200, {"queued": learn_queue.qsize()}
@@ -252,7 +252,7 @@ def _handle(path, body):
         result = {"log": ["記憶をすべて消去しました"]}
     else:
         return 404, {"error": "not found"}
-    if path not in ("/api/state", "/api/hook", "/api/learn"):
+    if path not in ("/api/state", "/api/hook", "/api/learn_session"):
         save()
         if path != "/api/recall":
             version += 1
