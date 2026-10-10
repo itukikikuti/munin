@@ -1,0 +1,14 @@
+{
+  "name": "munin",
+  "version": "0.2.0",
+  "private": true,
+  "description": "すべての会話を1つの記憶にして、関係する過去を思い出させる Claude Code のプラグイン",
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "setup": "node --no-warnings src/cli.ts setup",
+    "import": "node --no-warnings src/cli.ts import",
+    "server": "node --no-warnings src/cli.ts server",
+    "eval": "node --no-warnings src/cli.ts eval"
+  }
+}

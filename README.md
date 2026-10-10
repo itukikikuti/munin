@@ -35,18 +35,23 @@ Claude Code と Codex のすべての会話を1つの記憶にして、メッセ
 
 ## 入れ方(Claude Code のプラグイン)
 
-必要なもの: Python 3.10 以上(`python` で起動できること)と [Ollama](https://ollama.com)(アプリを起動しておく)
+必要なもの: [Node.js](https://nodejs.org) 22.18 以上(`node` で起動できること)。ほかに入れるものはない。
 
 ```bash
 claude plugin marketplace add itukikikuti/munin
 claude plugin install munin@munin
 ```
 
-入れたら、Claude Code で `/munin:setup` を実行する。足りないものを入れて、これまでのすべての会話から最初の記憶を作る。
+入れたら、Claude Code で `/munin:setup` を実行する。必要なものを取ってきて、これまでのすべての会話から最初の記憶を作る。
 
-- Python のパッケージ(janome・wordfreq・numpy・Pillow)を入れる
-- Ollama に埋め込みモデルを入れる。GPU(NVIDIA、6GB 以上)があれば精度の高い `qwen3-embedding:8b`(約4.7GB)、
-  なければ軽い `qwen3-embedding:0.6b`(約0.6GB)だけを使う。`/munin:setup --full` / `--light` で選べる
+| 取ってくるもの | 大きさ | 役目 |
+|---|---|---|
+| [llama.cpp](https://github.com/ggml-org/llama.cpp)(Vulkan 版) | 約30MB | 文の意味を数値(埋め込み)にする実行エンジン。Ollama の中身と同じ。NVIDIA・AMD・Intel のどの GPU でも動き、GPU がなければ CPU で動く |
+| [kuromoji](https://github.com/takuyaa/kuromoji.js) と IPADIC 辞書 | 約17MB | 日本語を語に分けて品詞を調べる |
+| [qwen3-embedding](https://huggingface.co/Qwen) 8B / 0.6B(GGUF) | 約4.7GB / 約0.6GB | 埋め込みのモデル。GPU が 6GB 以上あれば 8B、なければ 0.6B だけを使う(`--full` / `--light` で選べる) |
+
+- どれも版を固定し、取ってきたものは SHA-256 で照合する。置き場所は `~/.munin`
+- Ollama にすでに同じモデル(`qwen3-embedding:8b` / `:0.6b`)が入っていれば、そのファイルを使う(取ってこない)
 - 最初の記憶づくりは裏で進む(会話の量によって数分〜数十分)。終わるまでは思い出したことは差し込まれない
 
 ## 動き方
@@ -58,38 +63,40 @@ claude plugin install munin@munin
 | 返答が終わったとき | そのやり取りを覚える(Codex の会話などは、1時間ごとに拾い直す) |
 | Claude が必要なとき | 道具 `recall`(言葉で探し直す)と `recall_detail`(鍵から記録を開く)を使う |
 
-- 記憶のデータは `~/.munin` に置く(`MUNIN_HOME` で変えられる)。すべてこの PC の中で動き、会話の内容を外へ送らない
-- 差し込むたびに、何を出したかを `~/.munin/logs/recall_log.jsonl` に記録する。`python analyze_usage.py` で、
-  差し込んだ記憶が実際に使われたかを確信度ごとに集計できる
+- すべてこの PC の中で動き、会話の内容を外へ送らない。記憶のデータは `~/.munin` に置く(`MUNIN_HOME` で変えられる)
+- 差し込むたびに、何を出したかを `~/.munin/logs/recall_log.jsonl` に記録する
 - 記憶を画面で見るには、常駐サーバーが動いている間に http://127.0.0.1:8770 を開く(ネットワーク図つき)
-- 記憶を作り直すには `python import_sessions.py`(常駐サーバーは自動で読み直す)
 
-## 評価
+## コマンド
 
 ```bash
-python evaluate_memory.py                  # 調整用の期間で評価する
-python evaluate_memory.py --mode test      # 最終確認用の期間で評価する(調整が終わったときだけ)
-python compare_runs.py valid valid_sleep   # 同じ問題どうしで比べ、差が偶然かどうかを確かめる
-python analyze_usage.py                    # 実際に使ったときに、差し込んだ記憶が使われたかを調べる
+node src/cli.ts setup [--full|--light]   # 最初の準備
+node src/cli.ts import                   # すべてのセッション記録から記憶を作り直す(常駐サーバーは自動で読み直す)
+node src/cli.ts server                   # 常駐サーバーを起動する(普段はフックが起動する)
+node src/cli.ts detail 鍵 [--full]       # 鍵から記録を開く
+node src/cli.ts eval                     # 調整用の期間で評価する(--mode test で最終確認用の期間)
+node src/cli.ts compare 名前1 名前2       # 2つの評価結果を、同じ問題どうしで比べる(差が偶然かどうかを確かめる)
+node src/cli.ts usage                    # 実際に使ったときに、差し込んだ記憶が使われたかを確信度ごとに集計する
 ```
 
-過去のセッションを時刻順に体験させながら、「その時点で思い出したものに、Claude が実際にあとで使った語が入っていたか」を測る。
-RAG・キーワード検索・直近と比べ、仕組みを1つずつ外して効き目を確かめている。
+評価は、過去のセッションを時刻順に体験させながら、「その時点で思い出したものに、Claude が実際にあとで使った語が入っていたか」を測る。
+RAG・キーワード検索・直近と比べ、仕組みを1つずつ外して(`--ablate sleep` など)効き目を確かめている。
 
 ## ファイル
 
 | ファイル | 中身 |
 |---|---|
-| `brain.py` | 記憶のしくみ(皮質・海馬・睡眠・想起・強化・展望記憶) |
-| `import_sessions.py` | セッション記録を読み、時刻どおりに体験させる |
-| `store.py` | やり取りの全文と、部分ごとの意味・キーワード検索 |
-| `embed.py` | Ollama での埋め込み |
-| `intentions.py` | 「これからやること」の取り出し |
-| `hook.py` / `server.py` | Claude Code のフックと常駐サーバー(画面もここから) |
-| `mcp_server.py` | Claude が自分で使う道具(recall・recall_detail) |
-| `install.py` | 最初の準備(`/munin:setup` から呼ばれる) |
-| `paths.py` | 記憶のデータの置き場所 |
-| `memory_detail.py` | 鍵から記録を開く(コマンドで使うとき) |
+| `src/brain.ts` | 記憶のしくみ(皮質・海馬・睡眠・想起・強化・展望記憶) |
+| `src/sessions.ts` | セッション記録を読み、時刻どおりに体験させる |
+| `src/store.ts` | やり取りの全文と、部分ごとの意味・キーワード検索(Node.js の SQLite) |
+| `src/embed.ts` / `src/llama.ts` | 意味のベクトルと、それを計算する llama.cpp |
+| `src/text.ts` | 日本語を語に分ける(kuromoji) |
+| `src/intentions.ts` | 「これからやること」の取り出し |
+| `src/hook.ts` / `src/server.ts` | Claude Code のフックと常駐サーバー |
+| `src/mcp.ts` | Claude が自分で使う道具(recall・recall_detail) |
+| `src/graph.ts` / `src/layout.ts` / `index.html` | 記憶のネットワーク図 |
+| `src/setup.ts` | 最初の準備(`/munin:setup` から呼ばれる) |
+| `src/evaluate.ts` / `src/compare.ts` / `src/usage.ts` | 評価と、使ったときの分析 |
 | `.claude-plugin/` / `hooks/` / `commands/` | Claude Code のプラグインとしての設定 |
 
 記憶のデータと使ったときの記録は、個人の会話を含むので、リポジトリではなく `~/.munin` に置く。

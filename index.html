@@ -278,6 +278,71 @@ const theme = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" 
 const ll = ([x, y]) => [-y, x];   // 世界座標(x 右, y 下) → 地図座標(緯度, 経度)
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
+// タイルの中身(線・点・ラベル)はサーバーが決め、絵はここで描く。
+// 半透明の線は、背景色で塗った上に重ねて描くので、重なるほど濃くなる
+const THEMES = {
+  light: {bg: "#f6f5f1", line: "0,0,0", hippo: "30,100,170", ink: "#1d1d1b", node: "#ffffff", edge: "#5a5850",
+          place: "#2f7d5b", place_bg: "rgba(224,240,231,.94)", halo: "rgba(246,245,241,.8)"},
+  dark:  {bg: "#161614", line: "255,255,255", hippo: "120,180,235", ink: "#ecebe6", node: "#2a2925", edge: "#a09d91",
+          place: "#5fc193", place_bg: "rgba(23,56,42,.94)", halo: "rgba(22,22,20,.8)"},
+};
+const FONT = '"Yu Gothic UI","Yu Gothic","Hiragino Sans","Noto Sans JP",sans-serif';
+const GraphTiles = L.GridLayer.extend({
+  createTile(coords, done) {
+    const size = this.getTileSize(), dpr = window.devicePixelRatio || 1;
+    const canvas = L.DomUtil.create("canvas");
+    canvas.width = size.x * dpr; canvas.height = size.y * dpr;
+    canvas.style.width = size.x + "px"; canvas.style.height = size.y + "px";
+    fetch(`/tiles/${coords.z}/${coords.x}/${coords.y}.json?v=${this.options.version}`).then(r => r.json()).then(t => {
+      drawTile(canvas.getContext("2d"), t, dpr, THEMES[theme()], size.x);
+      done(null, canvas);
+    }).catch(e => done(e, canvas));
+    return canvas;
+  },
+});
+
+function drawTile(ctx, t, dpr, th, size) {
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = th.bg;
+  ctx.fillRect(0, 0, size, size);
+  ctx.lineWidth = 1;
+  for (let k = 0; k < t.lines.length; k += 5) {
+    ctx.strokeStyle = `rgba(${t.lines[k + 4] === 1 ? th.hippo : th.line},${t.alpha})`;
+    ctx.beginPath();
+    ctx.moveTo(t.lines[k], t.lines[k + 1]);
+    ctx.lineTo(t.lines[k + 2], t.lines[k + 3]);
+    ctx.stroke();
+  }
+  ctx.textBaseline = "top";
+  for (const n of t.nodes) {
+    if (n.k === "e") {   // 海馬の索引(出来事)
+      ctx.fillStyle = `rgba(${th.hippo},.8)`;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 2 * Math.PI); ctx.fill();
+    } else if (n.k === "p") {   // 場所
+      if (n.l) {
+        const text = n.l.replace(/\\/g, "＼");
+        ctx.font = `bold ${t.px}px ${FONT}`;
+        const w = ctx.measureText(text).width, h = t.px * 1.2;
+        ctx.fillStyle = th.place_bg; ctx.strokeStyle = th.place;
+        ctx.beginPath(); ctx.roundRect(n.x - w / 2 - 6, n.y - h / 2 - 4, w + 12, h + 8, 4); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = th.place; ctx.textAlign = "center";
+        ctx.fillText(text, n.x, n.y - h / 2 + 1);
+      } else {
+        ctx.fillStyle = th.place;
+        ctx.fillRect(n.x - n.r, n.y - n.r, 2 * n.r, 2 * n.r);
+      }
+    } else {   // 概念
+      ctx.fillStyle = th.node; ctx.strokeStyle = th.edge;
+      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+      if (n.l) {
+        ctx.font = `${t.px}px ${FONT}`; ctx.textAlign = "center";
+        ctx.lineWidth = 3; ctx.strokeStyle = th.halo; ctx.strokeText(n.l, n.x, n.y + n.r + 2);
+        ctx.lineWidth = 1; ctx.fillStyle = th.ink; ctx.fillText(n.l, n.x, n.y + n.r + 2);
+      }
+    }
+  }
+}
+
 async function renderMap() {
   if (!map) {
     map = L.map("map", {crs: L.CRS.Simple, minZoom: 0, zoomSnap: 1, zoomDelta: 1,
@@ -296,8 +361,8 @@ async function setTiles(force) {
   map.setMaxZoom(meta.max_zoom);
   map.setMaxBounds(L.latLngBounds(bounds).pad(0.5));
   if (tiles) tiles.remove();
-  tiles = L.tileLayer(`/tiles/{z}/{x}/{y}.png?v=${state.version}&theme=${theme()}`,
-    {tileSize: meta.tile, noWrap: true, bounds, maxNativeZoom: meta.max_zoom, maxZoom: meta.max_zoom, keepBuffer: 4}).addTo(map);
+  tiles = new GraphTiles({tileSize: meta.tile, noWrap: true, bounds, maxNativeZoom: meta.max_zoom, maxZoom: meta.max_zoom,
+    keepBuffer: 4, version: state.version}).addTo(map);
   tiles.bringToBack();
   if (tilesVersion === null || force === "fit") map.fitBounds(bounds);
   tilesVersion = state.version;
