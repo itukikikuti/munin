@@ -1,6 +1,6 @@
 {
   "name": "munin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "すべての会話を1つの記憶にして、関係する過去を思い出させる Claude Code のプラグイン",
   "type": "module",

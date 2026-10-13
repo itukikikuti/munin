@@ -46,6 +46,14 @@ const STOPWORDS = new Set(`
 ファイル フォルダ コード エラー 実行 作成 変更 追加 削除 使用 利用 設定 表示 機能 処理 動作 値 名前
 ユーザー 質問 回答 返答 指示 お願い 了解 承知 ありがとう 可能 不要 不明 OK ok
 `.split(/\s+/).filter(Boolean));
+// 英語の機能語(Claude の英語の独り言やコマンドの出力に出てくる。どの記憶を指しているかの手がかりにならない)
+const EN_STOPWORDS = new Set(`
+the and for are but not you all any can had her was one our out has have him his how its let may new now
+own see use way who did get got just than that this then them they there these those what when where which
+while with will would could should into onto from your yours about after again also because been before
+being both each even here more most much only other over same some such very want were why yet done make
+let's i'm it's don't i'll we'll i've ok okay yes good great sure next first last still need now
+`.split(/\s+/).filter(Boolean));
 
 export interface Turn {
   t: string;                    // 発言の日時(ISO、UTC)
@@ -70,7 +78,7 @@ export interface Turn {
 
 export function usable(w: string): boolean {
   const n = Array.from(w).length;
-  if (n < 2 || n > 20 || STOPWORDS.has(w)) return false;
+  if (n < 2 || n > 20 || STOPWORDS.has(w) || EN_STOPWORDS.has(w.toLowerCase())) return false;
   if (/^[\u3040-\u309f]+$/.test(w)) return false;           // ひらがなだけ(「こと」「やつ」など)
   if (/^[^\p{L}\p{M}]+$/u.test(w)) return false;             // 数字・記号だけ(文字を1つも含まない)
   if (/[\\/<>{}()\[\]=;:"'`|]/.test(w)) return false;        // パスやコードの断片

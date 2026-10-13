@@ -1,6 +1,6 @@
 {
   "name": "munin",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Claude Code と Codex のすべての会話を1つの記憶にして、メッセージを送るたびに、関係する過去を思い出して渡す(人の記憶のしくみ、LLM は使わない)",
   "author": { "name": "itukikikuti" },
   "license": "MIT",
